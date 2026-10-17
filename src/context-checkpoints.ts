@@ -6,6 +6,7 @@ import type { State } from './state.js';
 export type CheckpointState = {
   session: string;
   generation: number;
+  generations?: Record<string, number>;
   warned: boolean;
   pending?: 'save' | 'restore';
   claudeModel?: string;
@@ -20,6 +21,10 @@ const count = (n: unknown): n is number => typeof n === 'number' && Number.isSaf
 const windowSize = (n: unknown): n is number => count(n) && n > 0;
 
 const restoreTemplate = `Riftjack continuity notice (not a human message): context compaction completed. Before continuing, read your continuity note at CHECKPOINT_PATH if it exists, and follow any relevant memory references within your current permissions. It may be missing or stale; compare it with current instructions and newer messages. Continue the current task; this is not a new human request.`;
+export function generationCheckpointPath(workspace: string, session: string, generation: number) {
+  return join(workspace, '.riftjack', 'checkpoints', createHash('sha256').update('codex\0' + session).digest('hex'), `generation-${String(generation).padStart(6, '0')}.md`);
+}
+
 const quote = (text: string) => "'" + text.replaceAll("'", "'\\''") + "'";
 
 // SessionStart(compact) adds context before Claude's next model request. A
@@ -34,8 +39,9 @@ export function claudeCheckpointHooks(workspace: string) {
 export function contextCheckpoints(state: State, key: string, backend: 'codex' | 'claude', workspace: string, session: string) {
   const field = backend === 'codex' ? 'codexCheckpoint' : 'claudeCheckpoint';
   const saved = state.session(key)[field];
-  let value: CheckpointState = saved?.session === session ? { ...saved }
-    : { session, generation: 0, warned: false };
+  const generations = { ...saved?.generations, ...(saved ? { [saved.session]: saved.generation } : {}) };
+  let value: CheckpointState = saved?.session === session ? { ...saved, generations }
+    : { session, generation: generations[session] ?? 0, generations, warned: false };
   const path = join(workspace, '.riftjack', 'checkpoints', createHash('sha256').update(backend + '\0' + session).digest('hex') + '.md');
   let compacting = false;
   let restoredByHook = false;
@@ -81,9 +87,18 @@ export function contextCheckpoints(state: State, key: string, backend: 'codex' |
     notice() {
       if (!value.pending || compacting) return undefined;
       const id = `${value.generation}:${value.pending}`;
-      const text = value.pending === 'save'
+      let text = value.pending === 'save'
         ? `Riftjack continuity notice (not a human message): reported context usage has reached 65% of the reported window. Compaction may occur later. At your next opportunity, save a concise continuity note using your ordinary tools at ${JSON.stringify(path)}. Choose what you want preserved and references to existing memory. If writing is not allowed, respect that limit. Then continue the current task.`
         : restoreTemplate.replace('CHECKPOINT_PATH', () => JSON.stringify(path));
+      if (backend === 'codex') {
+        const current = generationCheckpointPath(workspace, session, value.generation);
+        const previous = generationCheckpointPath(workspace, session, Math.max(0, value.generation - 1));
+        const guidance = ` Write the current, self-contained note to ${JSON.stringify(current)} (generation ${value.generation}); create its parent directory if needed. Include the generation, update time, current intent, constraints, decisions and reasons, confirmed results, unresolved work, and references. Update this current file after significant results. Do not append new work to earlier generations; consult them only for historical evidence. Writing remains subject to your existing permissions.`;
+        text = value.pending === 'save'
+          ? `Riftjack continuity notice (not a human message): reported context usage has reached 65% of the reported window. Save a concise continuity note at your next opportunity.` + guidance
+          : restoreTemplate.replace('CHECKPOINT_PATH', () => JSON.stringify(previous)) + guidance;
+        text += ` If the generation note is missing, the pre-upgrade note at ${JSON.stringify(path)} may provide older context; verify it against newer messages and do not assume it is current.`;
+      }
       return { id, text };
     },
     delivered(id: string) {

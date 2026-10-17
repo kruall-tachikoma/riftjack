@@ -137,3 +137,12 @@ retry loop. State survives connector restarts. Replayed completion events
 alone do not enqueue another reminder. Unobserved compaction during a
 connector crash cannot enqueue the fallback reminder.
 The existing human-facing private compaction notices are unchanged.
+
+Codex continuity notes use session-specific generation paths:
+`.riftjack/checkpoints/<session-hash>/generation-NNNNNN.md`. After compaction,
+the agent is directed to read the previous generation and write a self-contained
+current note. Older generations are historical evidence, not a growing current
+journal. Generation counters survive switching away from and back to a physical
+session. Existing flat checkpoint files remain a read-only fallback when a new
+generation note is absent. The connector only provides paths; note creation and
+updates still use the agent's tools and permissions. Claude's hook is unchanged.

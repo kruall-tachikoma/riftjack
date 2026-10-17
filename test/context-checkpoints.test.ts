@@ -109,3 +109,28 @@ test('queued save superseded by compaction is not delivered after restore', asyn
   c.usage(70, 100); delivery.flush(); c.start(); c.complete(); delivery.flush(); await delivery.settled();
   assert.equal(sent.length, 1); assert.match(sent[0], /compaction completed/); assert.equal(c.notice(), undefined);
 });
+
+test('Codex generations restore the previous note and save a distinct current note across restart', t => {
+  const f = setup(t), c = f.checkpoint;
+  c.usage(70,100);const first=c.notice()!;
+  assert.match(first.text,/generation-000000\.md/);
+  c.delivered(first.id);c.start();c.complete();
+  const restore=c.notice()!;
+  assert.match(restore.text,/read your continuity note at .*generation-000000\.md/);
+  assert.match(restore.text,/Write the current, self-contained note to .*generation-000001\.md/);
+  assert.deepEqual(contextCheckpoints(new State(f.file),'key','codex',f.dir,'session').notice(),restore);
+  c.delivered(restore.id);c.usage(70,100);
+  assert.match(c.notice()!.text,/generation-000001\.md/);
+  c.start();c.complete();
+  assert.match(c.notice()!.text,/read your continuity note at .*generation-000001\.md/);
+  assert.match(c.notice()!.text,/Write the current, self-contained note to .*generation-000002\.md/);
+});
+
+test('switching physical sessions does not reuse an earlier generation filename', t => {
+ const f=setup(t);f.checkpoint.start();f.checkpoint.complete();
+ const other=contextCheckpoints(f.state,'key','codex',f.dir,'other');
+ other.usage(70,100);
+ const back=contextCheckpoints(f.state,'key','codex',f.dir,'session');
+ back.usage(70,100);
+ assert.match(back.notice()!.text,/generation-000001\.md/);
+});
