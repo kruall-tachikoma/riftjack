@@ -23,7 +23,7 @@ export class Interactions {
   private pending = new Map<string, { request: Interaction; delivered: boolean; eventId?: string; finish: (result: object) => void; cancel: () => void }>();
   get size(): number { return this.pending.size; }
 
-  async ask(request: Interaction, signal: AbortSignal, send: (text: string, controls: ReactionControls, markdown: string) => Promise<void>): Promise<object> {
+  async ask(request: Interaction, signal: AbortSignal, send: (text: string, controls: ReactionControls, markdown: string) => Promise<void>, onExpired?: (id: string) => Promise<void>): Promise<object> {
     signal.throwIfAborted();
     if (this.pending.size >= 10) throw new PublicError('Too many pending confirmation requests.');
     // Never approve a truncated description or schema.
@@ -33,7 +33,13 @@ export class Interactions {
     const result = new Promise<object>((yes, no) => { resolve = yes; reject = no; });
     void result.catch(() => {});
     const cleanup = () => { this.pending.delete(id); signal.removeEventListener('abort', abort); };
-    const abort = () => { cleanup(); reject(signal.reason || new Error('Confirmation expired.')); };
+    const abort = () => {
+      const delivered = this.pending.get(id)?.delivered;
+      cleanup();
+      reject(signal.reason || new Error('Confirmation expired.'));
+      // Cancellation must not wait for Matrix delivery or revive the request.
+      if (delivered && onExpired) void Promise.resolve().then(() => onExpired(id)).catch(() => {});
+    };
     this.pending.set(id, { request, delivered: false, finish: value => { cleanup(); resolve(value); }, cancel: abort });
     signal.addEventListener('abort', abort, { once: true });
     const prompt = confirmationPrompt(id, request);

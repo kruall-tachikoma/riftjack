@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 import { realpath, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { PublicError } from './errors.js';
 import { renderPublishReview } from './publish-html.js';
 import { confirmationDetails } from './confirmation-format.js';
@@ -34,7 +35,7 @@ async function git(repo: string, args: string[], signal: AbortSignal, input?: st
   signal.throwIfAborted();
   try {
     // Never interpret a shell command or inherit Git routing from the calling process.
-    const allowed = ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'SYSTEMROOT', 'SSH_AUTH_SOCK'];
+    const allowed = ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'SYSTEMROOT', 'SSH_AUTH_SOCK', 'GH_CONFIG_DIR'];
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => allowed.includes(k)));
     const operation = exec('git', ['--no-pager', '-c', 'core.quotePath=true', ...args], {
       cwd: repo, env: { ...env, GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1' }, signal,
@@ -43,9 +44,24 @@ async function git(repo: string, args: string[], signal: AbortSignal, input?: st
     operation.child.stdin?.end(input);
     const { stdout } = await operation;
     return stdout;
-  } catch {
+  } catch (error) {
+    // Git output can contain credentials or remote hook text. Keep it out of
+    // public errors and preserve it in an owner-only local diagnostic instead.
+    let diagnostic = '';
+    try {
+      const directory = await mkdtemp(join(tmpdir(), 'riftjack-git-error-'));
+      const path = join(directory, 'diagnostic.json');
+      const e = error as { code?: unknown; signal?: unknown; killed?: unknown; stdout?: unknown; stderr?: unknown };
+      await writeFile(path, JSON.stringify({
+        time: new Date().toISOString(), repository: repo,
+        code: e?.code, signal: e?.signal, killed: e?.killed,
+        stdout: typeof e?.stdout === 'string' ? e.stdout : '',
+        stderr: typeof e?.stderr === 'string' ? e.stderr : '',
+      }, null, 2), { flag: 'wx', mode: 0o600 });
+      diagnostic = ` Owner-only Git diagnostic: ${path}.`;
+    } catch { diagnostic = ' Could not save the local Git diagnostic.'; }
     signal.throwIfAborted();
-    throw new PublicError('Git review operation failed or exceeded its size/time limit. Check repository access and Git authentication on the host.');
+    throw new PublicError('Git review operation failed or exceeded its size/time limit. Check repository access and Git authentication on the host.' + diagnostic);
   }
 }
 
@@ -151,8 +167,9 @@ export async function pushReviewed(review: PublishReview, signal: AbortSignal, a
   try {
     await git(review.repository, ['-c', 'push.followTags=false', 'push', '--porcelain', '--no-follow-tags', '--recurse-submodules=no',
       '--force-with-lease=refs/heads/' + review.branch + ':' + (review.base ?? ''), '--', review.url, review.head + ':refs/heads/' + review.branch], signal);
-  } catch {
-    throw new PublicError('Publication was not confirmed. It may have reached the remote; check the destination before retrying. Nothing was retried automatically.');
+  } catch (error) {
+    const diagnostic = error instanceof PublicError ? ` ${error.message}` : '';
+    throw new PublicError('Publication was not confirmed. It may have reached the remote; check the destination before retrying. Nothing was retried automatically.' + diagnostic);
   }
 }
 

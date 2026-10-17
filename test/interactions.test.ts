@@ -321,3 +321,32 @@ test('unknown RPCs have no approval path; escalation policy accepts only on-requ
   assert.equal(loadConfig({ ...env, CODEX_APPROVAL_POLICY: 'never' }).codexApprovalPolicy, 'never');
   assert.throws(() => loadConfig({ ...env, CODEX_APPROVAL_POLICY: 'always' }), /CODEX_APPROVAL_POLICY/);
 });
+
+test('expired delivered confirmations notify once without waiting for delivery', async () => {
+  const interactions = new Interactions(), controller = new AbortController();
+  const notices: string[] = [];
+  const result = interactions.ask(request, controller.signal,
+    async (_text, controls) => controls.bind('$expired'),
+    async id => { notices.push(id); throw new Error('offline'); });
+  await Promise.resolve();
+  const rejected = assert.rejects(result);
+  controller.abort(); interactions.close();
+  await rejected;
+  await Promise.resolve();
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /^[a-f0-9]{12}$/);
+  assert.equal(interactions.size, 0);
+  assert.equal(interactions.react('$expired', '✅'), undefined);
+});
+
+test('answered confirmations do not emit expiration notices', async () => {
+  const interactions = new Interactions(), controller = new AbortController();
+  let notices = 0;
+  const result = interactions.ask(request, controller.signal,
+    async (_text, controls) => controls.bind('$approved'), async () => { notices++; });
+  await Promise.resolve();
+  interactions.react('$approved', '✅');
+  await result; controller.abort(); interactions.close();
+  await Promise.resolve();
+  assert.equal(notices, 0);
+});

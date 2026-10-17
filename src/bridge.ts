@@ -453,6 +453,10 @@ export class Bridge {
             }
             if (o.confirmation) await this.deliver(room, () => o.confirmation!(room, requestEvent, text, controls, markdown));
             else await this.reply(room, requestEvent, text);
+          }, async id => {
+            await this.authorize(room, current);
+            await this.reply(room, requestEvent,
+              `Confirmation ${id} is no longer active: it expired or was cancelled. Do not use its approval controls. A new request requires fresh approval.`);
           });
         const publish: PublishAction | undefined = o.publish ? async (input, callSignal) => {
           if (current.publication) throw new PublicError('A publication review is already pending.');
