@@ -1,3 +1,7 @@
+import { ManagerHistory } from './manager-history.js';
+import { planManager } from './manager-planner.js';
+import { parseManagerRoomRequest, managerRoomHelp } from './manager-rooms.js';
+import { RoomPolicies } from './room-policies.js';
 import { linkedRoomMessages } from './room-messages.js';
 import { threadRelation } from './thread-reply.js';
 import { RoomNotes, notesAction, notesCommand } from './room-notes.js';
@@ -103,6 +107,8 @@ async function main() {
     try { checkAudio(configForWorkspace(config, account.workspace)); }
     catch { /* Invalid workspace is reported by startAccount; unrelated bots can still start. */ }
   }
+  const managerHistory = new ManagerHistory(join(config.dataDir, 'manager-history.json'));
+  const roomPolicies = new RoomPolicies(join(config.dataDir, 'room-policies.json'), config.owner);
   const access = new Access(join(config.dataDir, 'allowed-users.json'), config.owner);
   if (process.argv.includes('--bootstrap-codex') || process.argv.includes('--bootstrap-claude') || process.argv.includes('--bootstrap-grok')) {
     for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => {
@@ -208,12 +214,16 @@ async function main() {
     const me = await client.getWhoAmI();
     phase('whoami');
     if (me.user_id !== account.userId || !me.device_id) throw new PublicError('Bot ' + account.userId + ' needs its own device-bound Matrix access token.');
-    const authorized = (sender: string) => access.has(sender, account.kind === 'manager' ? undefined : account.userId);
+    const authorized = (sender: string, room?: string) => room && roomPolicies.get(account.userId, room)
+      ? roomPolicies.has(account.userId, room, sender) && !accounts.list().some(a => a.userId === sender)
+      : access.has(sender, account.kind === 'manager' ? undefined : account.userId);
     const linkedAgent = links.agent(account.userId);
     const since = recoverMessages ? state.messageSince(account.userId, Date.now()) : Date.now();
     if (client instanceof MessageMatrixClient) client.history = { since,
       heads: () => state.roomHeads(account.userId), save: heads => state.saveRoomHeads(account.userId, heads) };
-    const privateRoom = async (room: string, sender: string) => linkedAgent
+    const privateRoom = async (room: string, sender: string) => roomPolicies.get(account.userId, room)
+      ? authorized(sender, room) && await roomPolicies.allowed(account.userId, room, sender, () => client.getRoomState(room))
+      : linkedAgent
       ? authorized(sender) && await links.allowed(account.userId, room, sender, () => client.getRoomState(room)) && authorized(sender)
       : isPrivateRoom(client, room, account.userId, sender, authorized);
     const reactionTarget = async (room: string, eventId: string): Promise<MatrixEvent | undefined> => {
@@ -292,14 +302,15 @@ async function main() {
       queuedUpdateMessage: account.kind === 'claude' ? 'Your update is queued for Claude Code in this conversation. It will run after the current step.' : undefined,
       since, recoverMessages, timeoutMs: config.timeoutMs, state, report: error => diagnostics(error, account.userId),
       typing: (room, typing, timeout) => client.setTyping(room, typing, timeout),
+      conversationKey: (room, event) => roomPolicies.get(account.userId, room) ? JSON.stringify([account.userId, sessionKey(room, event)]) : undefined,
       linkedSession: linkedAgent ? (room, event) => links.key(account.userId, room, event) : undefined,
-      decoratePrompt: linkedAgent ? (room, event, prompt, steering) => links.prompt(account.userId, room, event, prompt, steering)
-        : account.kind === 'codex' || account.kind === 'claude' ? (room, event, prompt) => matrixPrompt(account.userId, room, event, prompt) : undefined,
+      decoratePrompt: linkedAgent ? (room, event, prompt, steering) => roomPolicies.get(account.userId, room) ? matrixPrompt(account.userId, room, event, prompt, { visibility: 'shared' }) : links.prompt(account.userId, room, event, prompt, steering)
+        : account.kind === 'codex' || account.kind === 'claude' ? (room, event, prompt) => matrixPrompt(account.userId, room, event, prompt, roomPolicies.get(account.userId, room) ? { visibility: 'shared' } : {}) : undefined,
       notesContext: account.kind === 'manager' ? undefined : (key, room) => notes.context(JSON.stringify([account.userId, key]), room),
       notesReset: key => notes.forget(JSON.stringify([account.userId, key])),
       notesCommand: account.kind === 'manager' ? undefined : (room, sender, prompt) => notesCommand(notes, room, sender, prompt),
       roomNotes: account.kind === 'manager' ? undefined : (input, room) => notesAction(notes, room, account.userId, input, botConfig.sandbox !== 'read-only'),
-      promptDelivered: linkedAgent ? () => links.acknowledge(account.userId) : undefined,
+      promptDelivered: linkedAgent ? room => { if (!roomPolicies.get(account.userId, room)) links.acknowledge(account.userId); } : undefined,
       roomMessages: linkedAgent ? (request, context, signal) => linkedRoomMessages(links, account.userId, context, {
         allowed: privateRoom, stopping: () => stopping || restart.pending,
         send: (room, content) => client.sendMessage(room, content),
@@ -309,9 +320,9 @@ async function main() {
         sendFiles: (room, files, signal, authorize) => media.send(room, files, undefined, signal, authorize),
       })(request, signal) : undefined,
       mentions: linkedAgent ? (room, text) => links.mentions(account.userId, room, text) : undefined,
-      shared: linkedAgent ? room => !!links.room(account.userId, room) : undefined,
+      shared: room => !!roomPolicies.get(account.userId, room) || !!links.room(account.userId, room),
       // A newly accepted human message to this agent restores its peer credit.
-      accepted: linkedAgent ? () => links.credit(account.userId) : undefined,
+      accepted: linkedAgent ? room => { if (!roomPolicies.get(account.userId, room)) links.credit(account.userId); } : undefined,
       publish: (account.kind === 'codex' || account.kind === 'claude') && botConfig.sandbox !== 'read-only'
         ? (input, signal, interact, authorize) => requestPublish(input, botConfig.workspace, botConfig.dataDir, botConfig.maxMediaBytes, signal, interact, authorize) : undefined,
       background: background ? async (input, { room, event, key }, signal) => {
@@ -335,6 +346,37 @@ async function main() {
       async run(mode, prompt, key, signal, sender, attachments, interact, publish, hooks) {
         // Coding bots never interpret account-management commands.
         if (account.kind !== 'manager' || mode !== 'manager') return backend(mode, prompt, key, signal, sender, attachments, interact, publish, hooks);
+        const executeManager = async (prompt: string): Promise<string> => {
+        const roomRequest = parseManagerRoomRequest(prompt);
+        if (roomRequest) {
+          if (sender !== access.owner) throw new PublicError('Only the owner can manage room access.');
+          if (roomRequest.action === 'list') return JSON.stringify(roomPolicies.list(), null, 2);
+          const botId = roomRequest.action === 'invite' ? roomRequest.bot : roomRequest.policy.bot;
+          const roomId = roomRequest.action === 'invite' ? roomRequest.room : roomRequest.policy.room;
+          const target = accounts.list().find(a => a.userId === botId);
+          if (!target || !['codex', 'claude'].includes(target.kind)) throw new PublicError('Select an existing Codex or Claude bot.');
+          if (links.room(botId, roomId) || links.agent(botId)?.home === roomId) throw new PublicError('This room uses existing session links. Manage that configuration separately.');
+          const roomState = await client.getRoomState(roomId);
+          const content = (type: string, key = '') => roomState.find(e => e.type === type && e.state_key === key)?.content;
+          if (content('m.room.member', account.userId)?.membership !== 'join' || content('m.room.member', sender)?.membership !== 'join' ||
+              content('m.room.encryption')?.algorithm !== 'm.megolm.v1.aes-sha2' || content('m.room.join_rules')?.join_rule !== 'invite' ||
+              content('m.room.history_visibility')?.history_visibility !== 'joined') throw new PublicError('Manager and owner must be joined to an encrypted, invite-only room with joined history visibility.');
+          signal.throwIfAborted();
+          if (roomRequest.action === 'policy') {
+            roomPolicies.set(sender, roomRequest.policy);
+            // Stop in-flight tasks as well as changing admission for future requests.
+            const bridge = clients.get(botId)?.bridge;
+            for (const user of roomState.filter(e => e.type === 'm.room.member').map(e => e.state_key)) {
+              if (user && bridge instanceof Bridge) bridge.revokeRoom(user, roomId);
+            }
+            return 'Room policy saved: ' + JSON.stringify(roomRequest.policy);
+          }
+          const membership = content('m.room.member', botId)?.membership;
+          if (membership === 'join') return 'Bot is already joined to ' + roomId;
+          if (membership === 'invite') return 'Invitation already pending for ' + botId + ' in ' + roomId;
+          await client.inviteUser(botId, roomId);
+          return 'Invitation sent to ' + botId + ' for ' + roomId + '. Joining is not yet confirmed; reply permissions are configured separately.';
+        }
         const profileRequest = parseProfileRequest(prompt);
         if (profileRequest) return updateBotProfile(profileRequest, {
           accounts, owner: access.owner, sender, signal, attachments: attachments ?? [], maxBytes: config.maxMediaBytes,
@@ -399,6 +441,55 @@ async function main() {
           }
           return '**Bot created:** ' + markdownText(created.name) + '\n\n' + managerBotList([created], requestedConfig.workspace) + '\n\nAccept the encrypted DM invitation and send a task.';
         } finally { creating = false; }
+        };
+        // Natural-language planning is owner-only; existing delegated commands retain their authorization checks.
+        if (sender !== access.owner) return executeManager(prompt);
+        if (!interact) throw new PublicError('Manager confirmation is unavailable.');
+        const rooms = [];
+        for (const roomId of (await client.getJoinedRooms()).slice(0, 100)) {
+          signal.throwIfAborted();
+          try {
+            const rs = await client.getRoomState(roomId);
+            if (!rs.some(e => e.type === 'm.room.member' && e.state_key === sender && e.content?.membership === 'join')) continue;
+            rooms.push({ id: roomId, name: rs.find(e => e.type === 'm.room.name')?.content?.name ?? roomId });
+          } catch { /* Rooms that cannot be inspected are not planning candidates. */ }
+        }
+        const snapshot = {
+          rooms,
+          bots: accounts.list().map(a => ({ id: a.userId, name: a.name, kind: a.kind, workspace: a.workspace ?? config.workspace, settings: a.engineSettings })),
+          policies: roomPolicies.list(), sharedAccess: access.list(),
+          commands: MANAGER_HELP + '\n' + managerRoomHelp,
+        };
+        const history = managerHistory.recent(key);
+        const plan = await planManager(botConfig, prompt, snapshot, history, signal);
+        // Validate the entire plan before requesting consent. No arbitrary command execution.
+        for (const command of plan.commands) {
+          const target = parseBotSettingsRequest(command)?.target ?? parseBotAccessRequest(command)?.target ?? parseProfileRequest(command)?.userId;
+          if (target && !accounts.list().some(a => a.userId === target)) throw new PublicError('Plans must select existing bots by full Matrix ID. No changes applied.');
+          if (managerHistory.unresolved(command)) throw new PublicError('A previous attempt of this operation has an unknown outcome. Inspect the resulting state before retrying.');
+          if (!parseManagerRoomRequest(command) && !parseProfileRequest(command) && !parseBotSettingsRequest(command) &&
+              !parseBotAccessRequest(command) && !parseUserCreation(command) && !parseAccessRequest(command) && !parseManagerRequest(command))
+            throw new PublicError('The manager proposed an unsupported operation. No changes applied.');
+        }
+        if (plan.commands.length > 1 && plan.commands.some(command => parseUserCreation(command) || parseManagerRequest(command)?.action === 'create'))
+          throw new PublicError('Account creation must be a standalone plan. Inspect its result before requesting further changes.');
+        const run = managerHistory.begin(key, prompt, plan.commands);
+        let result = plan.reply;
+        if (plan.commands.length) {
+          const answer = await interact({ text: 'Apply this manager plan?\n\n' + JSON.stringify(plan.commands, null, 2), approve: { apply: true }, deny: { apply: false } }, signal);
+          if (!('apply' in answer) || answer.apply !== true) { managerHistory.update(run, { state: 'declined' }); return 'Manager plan declined. No changes applied.'; }
+          const outcomes: string[] = [];
+          for (const command of plan.commands) {
+            signal.throwIfAborted();
+            if (sender !== access.owner || !access.has(sender)) throw new PublicError('Manager access changed.');
+            managerHistory.update(run, { state: 'running', next: outcomes.length });
+            try { outcomes.push(await executeManager(command)); managerHistory.update(run, { results: outcomes.map((v, i) => parseUserCreation(plan.commands[i]) ? 'Matrix user operation completed; credentials omitted.' : v), next: outcomes.length }); }
+            catch (error) { outcomes.push(errorMessage(error, 'Operation failed') + ' Remaining operations were not attempted. Completed changes remain.'); managerHistory.update(run, { state: 'uncertain', results: outcomes.map((v, i) => parseUserCreation(plan.commands[i]) ? 'Matrix user operation; inspect its private reply.' : v) }); break; }
+          }
+          result = outcomes.join('\n\n');
+        }
+        if (run.state !== 'uncertain') managerHistory.update(run, { state: 'complete', ...(plan.commands.length ? {} : { results: [result] }) });
+        return result;
       },
       receive: (event, key, signal, authorize) => media.receive(event.content!, key, signal, authorize),
       transcribe: (file, signal) => audio ? audio.transcribe(file, signal) : Promise.resolve(file),
@@ -434,6 +525,10 @@ async function main() {
     });
     let incoming = Promise.resolve();
     const routeIncoming = async (room: string, event: MatrixEvent): Promise<boolean> => {
+      if (roomPolicies.get(account.userId, room)) {
+        if (!event.sender || accounts.list().some(a => a.userId === event.sender) || !(await privateRoom(room, event.sender))) return false;
+        return roomPolicies.triggers(account.userId, room, event, id => reactionTarget(room, id));
+      }
       const shared = links.room(account.userId, room);
       if (shared) {
         if (!Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < since || !(await privateRoom(room, shared.owner))) return false;
@@ -481,7 +576,7 @@ async function main() {
       if (account.kind !== 'grok' && !(client instanceof MessageMatrixClient) && event.type === 'm.reaction') void inbox(room, event).catch(diagnostics);
     });
     client.on('room.invite', (room: string, event: MatrixEvent) => {
-      if (event.sender && authorized(event.sender)) void client.joinRoom(room).catch(diagnostics);
+      if (event.sender && (authorized(event.sender) || accounts.list().some(a => a.kind === 'manager' && a.userId === event.sender))) void client.joinRoom(room).catch(diagnostics);
     });
     client.on('room.failed_decryption', () => console.warn(account.name + ': message could not be decrypted. Check device trust and key sharing in Element.'));
     let online = false;
@@ -492,7 +587,7 @@ async function main() {
         if (!online || starting || stopping || restart.pending || !clients.has(account.userId)) return;
         await codingBridge.drainQueued();
         await background.pump({
-          valid: target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session,
+          valid: target => authorized(target.sender, target.room) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session,
           deliver: (target, event, admitted, ready, completed) => codingBridge.resumeBackground(target.room, event, target.session, admitted, ready, completed),
           // A room timer is the bot's own message: no turn, mentions or human origin.
           post: async (target, text, admitted, ready) => {

@@ -1,6 +1,9 @@
 export const MANAGER_HELP = [
   '## Bot Manager · Help',
   'Create bots and Matrix users, edit profiles and manage access. Send commands **in this DM**. Management commands use English, without `!`; replace example names and paths with your own.',
+  '### Conversational administration',
+  'The owner can describe a request in natural language. The manager uses the configured Codex model to prepare a plan and asks for explicit confirmation before running its commands. Replies in chat are not approvals. Plans and step results are retained locally; completed steps are not rolled back if a later step fails. Existing commands remain available to other authorized users.',
+  'Invite the manager to a room first and grant it permission to invite members. Then ask it to invite a bot or configure room replies. Use full room IDs when names are ambiguous. Room policies support owner, named users, or current members, with replies off, on mentions, in bot-rooted threads, or to all messages. Existing linked rooms remain managed by their separate configuration. Room access does not grant DM or manager access.',
   '### Create a bot',
   '- `create a Codex bot called Builder`\n- `create a Claude bot called Research`\n- `create a Grok bot called Research`',
   'Grok bots use an external worker. Enable `WORKER_PORT` on the connector host first; configure the worker’s folder on its own machine.',

@@ -41,7 +41,7 @@ export type BackendHooks = { background?: BackgroundAction; progress?: (text: st
 export type Backend = (mode: Mode, prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[], interact?: Interact, publish?: PublishAction, hooks?: BackendHooks) => Promise<string | BackendReply>;
 export type Steer = (prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[]) => Promise<boolean>;
 type Options = {
-  botId: string; isAuthorized: (user: string) => boolean; kind: Mode; since: number; timeoutMs: number;
+  botId: string; isAuthorized: (user: string, room?: string) => boolean; kind: Mode; since: number; timeoutMs: number;
   isPrivateRoom: (room: string, sender: string) => Promise<boolean>;
   state: State; run: Backend;
   steer?: Steer;
@@ -75,9 +75,10 @@ type Options = {
   // Compaction notices may be routed to a private home while work runs in a shared room.
   compactionRoom?: string;
   compaction?: (phase: CompactionPhase, context: { room: string; sender: string }) => Promise<void>;
+  conversationKey?: (room: string, event: MatrixEvent) => string | undefined;
   linkedSession?: (room: string, event: MatrixEvent) => string;
   decoratePrompt?: (room: string, event: MatrixEvent, prompt: string, steering?: boolean) => string;
-  promptDelivered?: () => void;
+  promptDelivered?: (room: string) => void;
   // Extracts a validated peer mention request from a final reply in a shared room.
   mentions?: (room: string, text: string) => Mentions | undefined;
   // Shared rooms: the agent may decline a human message with NO_REPLY, so no
@@ -134,6 +135,10 @@ export class Bridge {
     if (this.restartNotice?.event.sender === sender) this.restartNotice = undefined;
     if (this.active?.sender === sender) this.active.controller.abort();
   }
+  revokeRoom(sender: string, room: string) {
+    if (this.restartNotice?.event.sender === sender && this.restartNotice.room === room) this.restartNotice = undefined;
+    if (this.active?.sender === sender && this.active.room === room) this.active.controller.abort();
+  }
   // One notice per bot startup, only for an existing conversation. No private
   // task files are read to decide whether to start a turn.
   scheduleRestart(id: string, room: string, sender: string, session: string, thread?: string): void {
@@ -141,13 +146,13 @@ export class Bridge {
     const event: MatrixEvent = { type: 'm.room.message', event_id: `restart:${id}:${this.options.botId}`,
       sender, origin_server_ts: Date.now(), content: { msgtype: 'm.text', body: RESTART_PROMPT, [NOTICE]: 'restart',
         ...(thread && { 'm.relates_to': { rel_type: 'm.thread', event_id: thread } }) } };
-    const key = this.options.linkedSession?.(room, event) ?? sessionKey(room, event);
+    const key = this.options.conversationKey?.(room, event) ?? this.options.linkedSession?.(room, event) ?? sessionKey(room, event);
     this.restartNotice = { room, event, key, session };
   }
   async resumeRestart(): Promise<void> {
     const notice = this.restartNotice, o = this.options;
     if (!notice || this.busy || this.stopped || o.isStopping?.()) return;
-    if (!o.isAuthorized(notice.event.sender!) || o.state.session(notice.key)[o.kind as 'codex' | 'claude'] !== notice.session) {
+    if (!o.isAuthorized(notice.event.sender!, notice.room) || o.state.session(notice.key)[o.kind as 'codex' | 'claude'] !== notice.session) {
       this.restartNotice = undefined; return;
     }
     await this.resumeBackground(notice.room, notice.event, notice.session, () => {}, () => this.restartNotice === notice);
@@ -155,7 +160,7 @@ export class Bridge {
   // Called synchronously by the Matrix inbox before /sync advances its checkpoint.
   capture(room: string, event: MatrixEvent): void {
     const o = this.options;
-    if (!o.recoverMessages || !event.sender || !o.isAuthorized(event.sender) || event.sender === o.botId ||
+    if (!o.recoverMessages || !event.sender || !o.isAuthorized(event.sender, room) || event.sender === o.botId ||
         event.type !== 'm.room.message' || !event.event_id || event.content?.[AGENT_TRIGGER] || event.content?.[NOTICE] ||
         event.content?.[SERVICE] || event.content?.['m.relates_to']?.rel_type === 'm.replace' ||
         !Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < o.since ||
@@ -172,7 +177,7 @@ export class Bridge {
         if (this.stopped || o.isStopping?.()) break;
         const id = message.event.event_id!;
         if (!o.state.recoverable(o.botId).some(m => m.event.event_id === id)) continue;
-        if (!message.event.sender || !o.isAuthorized(message.event.sender) || !(await route(message.room, message.event))) {
+        if (!message.event.sender || !o.isAuthorized(message.event.sender, message.room) || !(await route(message.room, message.event))) {
           o.state.completeMessages(o.botId, [id]); continue;
         }
         o.state.removePending(o.botId, [id]);
@@ -190,7 +195,7 @@ export class Bridge {
   async handle(room: string, event: MatrixEvent): Promise<void> {
     const o = this.options;
     // Locally created turns are never accepted from Matrix.
-    if (!event.sender || !o.isAuthorized(event.sender) || event.sender === o.botId || event.content?.[AGENT_TRIGGER] || event.content?.[NOTICE]) return;
+    if (!event.sender || !o.isAuthorized(event.sender, room) || event.sender === o.botId || event.content?.[AGENT_TRIGGER] || event.content?.[NOTICE]) return;
     if (event.type === 'm.reaction') { await this.handleReaction(room, event); return; }
     if (this.replaying.has(event.event_id!)) return;
     this.capture(room, event);
@@ -242,17 +247,17 @@ export class Bridge {
   private async acceptMessage(room: string, event: MatrixEvent, feedback: boolean, background: { session: string; admitted: () => void; ready?: () => boolean; completed?: (cancelled?: boolean) => void } | undefined,
     fromQueue: boolean, batch: MatrixEvent[], admitted: () => void): Promise<void> {
     const o = this.options;
-    if (!event.sender || !o.isAuthorized(event.sender) || event.sender === o.botId) return;
+    if (!event.sender || !o.isAuthorized(event.sender, room) || event.sender === o.botId) return;
     const media = isMedia(event.content?.msgtype);
     if (event.type !== 'm.room.message' || (event.content?.msgtype !== 'm.text' && !media) || !event.event_id) return;
     if (!Number.isFinite(event.origin_server_ts) || (!fromQueue && !background && event.origin_server_ts! < o.since)) return;
     if (event.content?.['m.relates_to']?.rel_type === 'm.replace') return;
     const body = messageBody(event);
     const prompt = body?.trim() || (media ? 'An attachment was sent. Describe what you can inspect, or ask what to do with it.' : '');
-    if (!prompt || !(await o.isPrivateRoom(room, event.sender)) || !o.isAuthorized(event.sender)) return;
+    if (!prompt || !(await o.isPrivateRoom(room, event.sender)) || !o.isAuthorized(event.sender, room)) return;
     if (background) {
       if (this.active || this.stopped || o.isStopping?.() || (o.kind !== 'codex' && o.kind !== 'claude') ||
-        o.state.session(o.linkedSession?.(room, event) ?? sessionKey(room, event))[o.kind] !== background.session || background.ready?.() === false) return;
+        o.state.session(o.conversationKey?.(room, event) ?? o.linkedSession?.(room, event) ?? sessionKey(room, event))[o.kind] !== background.session || background.ready?.() === false) return;
     } else if (!fromQueue) {
       if (!o.state.claim(JSON.stringify([o.botId, event.event_id]))) return;
       if (!feedback && !event.content?.[AGENT_TRIGGER] && !prompt.startsWith('!')) o.accepted?.(room, event);
@@ -267,7 +272,7 @@ export class Bridge {
     if (verb === 'restart' && event.sender === o.owner &&
       !o.state.claim(JSON.stringify(['connector-restart', room, event.event_id]))) return;
     const key = sessionKey(room, event);
-    const backendKey = o.linkedSession?.(room, event) ?? key;
+    const backendKey = o.conversationKey?.(room, event) ?? o.linkedSession?.(room, event) ?? key;
     // Room-state requests may finish out of order. Preserve incoming admission
     // order, then release before any model work so controls/steering can proceed.
     admitted();
@@ -284,7 +289,7 @@ export class Bridge {
       if (event.content?.[AGENT_TRIGGER] || event.content?.[NOTICE]) { await reply('Notes commands require a human message.'); return; }
       if (!o.state.claim(JSON.stringify(['room-notes', room, event.event_id]))) return;
       try {
-        if (!(await o.isPrivateRoom(room, event.sender)) || !o.isAuthorized(event.sender)) return;
+        if (!(await o.isPrivateRoom(room, event.sender)) || !o.isAuthorized(event.sender, room)) return;
         await reply(o.notesCommand(room, event.sender, prompt));
       } catch (error) { o.report(error); await reply(errorMessage(error, 'Could not update room notes')); }
       return;
@@ -372,7 +377,7 @@ export class Bridge {
       return;
     }
     if (!prompt || prompt.length > 16_000) { await this.reply(room, event, 'Supply a prompt of 1–16,000 characters.\n' + help(o.kind), true); return; }
-    if (verb === 'reset' && o.linkedSession) {
+    if (verb === 'reset' && o.linkedSession && o.conversationKey?.(room, event) === undefined) {
       await reply('This agent continues a pinned session across linked rooms. Reset is disabled; explicitly reconfigure its session link to replace that history.'); return;
     }
     const agentTurn = !!event.content?.[AGENT_TRIGGER];
@@ -401,7 +406,7 @@ export class Bridge {
       const relation = event.content?.['m.relates_to'];
       if (o.recoverMessages) o.state.cancelMessages(o.botId, room, event.sender,
         relation?.rel_type === 'm.thread' ? relation.event_id ?? null : null);
-      o.state.reset(key); o.notesReset?.(backendKey); await reply('Your conversation state has been reset.'); return;
+      o.state.reset(backendKey); o.notesReset?.(backendKey); await reply('Your conversation state has been reset.'); return;
     }
     const controller = new AbortController();
     let markReady!: () => void;
@@ -414,7 +419,7 @@ export class Bridge {
     }
     this.active = current;
     current.typing = o.typing ? taskTyping((typing, timeout) => o.typing!(room, typing, timeout),
-      async () => await o.isPrivateRoom(room, current.sender) && o.isAuthorized(current.sender), o.report, controller.signal) : undefined;
+      async () => await o.isPrivateRoom(room, current.sender) && o.isAuthorized(current.sender, room), o.report, controller.signal) : undefined;
     let timedOut = false;
     let runId: string | undefined;
     let runStage: 'preparing' | 'running' | 'delivering' = 'preparing';
@@ -489,7 +494,7 @@ export class Bridge {
             try {
               // Unlike progress, an interrupted-compaction notice is useful after
               // cancellation too. The destination rechecks access independently.
-              if (!o.isAuthorized(current.sender)) return;
+              if (!o.isAuthorized(current.sender, room)) return;
               const destination = o.compactionRoom ?? room;
               if (o.compaction) await this.deliver(destination, () => o.compaction!(phase, { room: destination, sender: current.sender }));
             } catch (error) { o.report(error); }
@@ -542,7 +547,7 @@ export class Bridge {
             backendKey, controller.signal, event.sender, next.attachments, interact, publish, hooks);
         current.markReady();
         let result: string | BackendReply;
-        try { result = await task; noteContext?.delivered(); if (verb !== 'publish' && !command) o.promptDelivered?.(); }
+        try { result = await task; noteContext?.delivered(); if (verb !== 'publish' && !command) o.promptDelivered?.(room); }
         finally { turnLifetime.abort(); current.running = false; current.interactions.close(); }
         while (current.buffered) await current.steering;
         controller.signal.throwIfAborted();
@@ -601,7 +606,7 @@ export class Bridge {
       current.markReady();
       while (current.buffered) await current.steering;
       o.report(error);
-      if (current.sender === o.owner && o.isAuthorized(current.sender)) {
+      if (current.sender === o.owner && o.isAuthorized(current.sender, room)) {
         try { await o.ownerDiagnostic?.(error, { room, sender: current.sender }); }
         catch (deliveryError) { o.report(deliveryError); }
       }
@@ -611,7 +616,7 @@ export class Bridge {
         ? `Task ${timedOut ? 'timed out' : 'cancelled'}. Pending follow-ups were discarded. Changes already made are retained.`
         : errorMessage(error) + (current.followups.length ? ' Pending follow-ups were not run; please resend them.' : ''));
     } finally {
-      if (current.cancelled || !o.isAuthorized(current.sender)) {
+      if (current.cancelled || !o.isAuthorized(current.sender, room)) {
         background?.completed?.(true);
         if (o.recoverMessages) o.state.completeMessages(o.botId, current.inputIds);
         for (const id of current.inputIds) this.retained.delete(id);
@@ -630,7 +635,7 @@ export class Bridge {
     if (feedbackMeaning(relation?.key)) {
       if (this.stopped || o.isStopping?.() || o.kind === 'manager' || !o.reactionTarget ||
         !Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < o.since) return;
-      const feedback = await reactionFeedback(room, event, { botId: o.botId, authorized: o.isAuthorized,
+      const feedback = await reactionFeedback(room, event, { botId: o.botId, authorized: sender => o.isAuthorized(sender, room),
         privateRoom: o.isPrivateRoom, read: o.reactionTarget });
       if (feedback) await this.handleMessage(room, feedback, true);
       return;
@@ -648,9 +653,9 @@ export class Bridge {
   }
 
   private async authorize(room: string, active: Active): Promise<void> {
-    if (!this.options.isAuthorized(active.sender) || !(await this.options.isPrivateRoom(room, active.sender))) throw new PublicError('Task stopped because access or room membership changed.');
+    if (!this.options.isAuthorized(active.sender, room) || !(await this.options.isPrivateRoom(room, active.sender))) throw new PublicError('Task stopped because access or room membership changed.');
     active.controller.signal.throwIfAborted();
-    if (!this.options.isAuthorized(active.sender)) throw new PublicError('Account access was revoked.');
+    if (!this.options.isAuthorized(active.sender, room)) throw new PublicError('Account access was revoked.');
   }
 
   private async receive(room: string, event: MatrixEvent, active: Active): Promise<IncomingAttachment[]> {
