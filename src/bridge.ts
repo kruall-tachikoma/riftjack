@@ -37,7 +37,7 @@ export type MatrixEvent = {
 };
 export type Mentions = { text: string; mentions: string[]; error?: string };
 export type Mode = 'codex' | 'claude' | 'grok' | 'manager';
-export type BackendHooks = { background?: BackgroundAction; progress?: (text: string) => Promise<void>; compaction?: (phase: CompactionPhase) => Promise<void>; sendAttachments?: SendAttachments; roomMessages?: RoomMessageTool; roomNotes?: ToolAction };
+export type BackendHooks = { github?: BackgroundAction; background?: BackgroundAction; progress?: (text: string) => Promise<void>; compaction?: (phase: CompactionPhase) => Promise<void>; sendAttachments?: SendAttachments; roomMessages?: RoomMessageTool; roomNotes?: ToolAction };
 export type Backend = (mode: Mode, prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[], interact?: Interact, publish?: PublishAction, hooks?: BackendHooks) => Promise<string | BackendReply>;
 export type Steer = (prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[]) => Promise<boolean>;
 type Options = {
@@ -63,6 +63,7 @@ type Options = {
   tasks?: (room: string, event: MatrixEvent, key: string) => string;
   journal?: RunJournal;
   publish?: (input: unknown, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) => Promise<string>;
+  github?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
   background?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
   roomMessages?: (request: MessageRequest, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
   roomNotes?: (input: unknown, room: string) => string;
@@ -512,6 +513,13 @@ export class Bridge {
             await this.authorize(room, current);
             signal.throwIfAborted();
             await this.deliver(room, () => o.sendAttachments!(room, requestEvent, files, signal));
+          } : undefined,
+          github: o.github ? async (input, callSignal) => {
+            const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
+            signal.throwIfAborted();
+            await this.authorize(room, current);
+            signal.throwIfAborted();
+            return o.github!(input, { room, event: requestEvent, key: backendKey }, signal);
           } : undefined,
           background: o.background ? async (input, callSignal) => {
             const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
