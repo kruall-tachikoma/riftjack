@@ -122,6 +122,7 @@ export class Bridge {
   private recoveryNotes = new Set<string>();
   private restartNotice?: { room: string; event: MatrixEvent; key: string; session: string };
   private admission = Promise.resolve();
+  private pendingAdmissions = 0;
   constructor(private options: Options) {}
   private deliver<T>(room: string, send: () => Promise<T>): Promise<T> {
     const typing = this.active?.room === room ? this.active.typing : undefined;
@@ -213,7 +214,7 @@ export class Bridge {
 
   // `ready` is rechecked synchronously right before admission, after the privacy check.
   async resumeBackground(room: string, event: MatrixEvent, session: string, admitted: () => void, ready?: () => boolean, completed?: (cancelled?: boolean) => void): Promise<boolean> {
-    if (this.busy || this.stopped || this.options.isStopping?.()) return false;
+    if (this.busy || this.pendingAdmissions > 0 || this.stopped || this.options.isStopping?.()) return false;
     let finished = false;
     await this.handleMessage(room, event, true, { session, ready, admitted, completed: cancelled => { completed?.(cancelled); finished = true; } });
     return finished;
@@ -238,8 +239,17 @@ export class Bridge {
     // privacy check. It must not reserve the human admission queue.
     if (background) return this.acceptMessage(room, event, feedback, background, fromQueue, batch, () => {});
     const previous = this.admission;
+    this.pendingAdmissions++;
     let admitted!: () => void;
-    this.admission = new Promise<void>(resolve => { admitted = resolve; });
+    this.admission = new Promise<void>(resolve => {
+      let released = false;
+      admitted = () => {
+        if (released) return;
+        released = true;
+        this.pendingAdmissions--;
+        resolve();
+      };
+    });
     await previous;
     try { await this.acceptMessage(room, event, feedback, background, fromQueue, batch, admitted); }
     finally { admitted(); }
@@ -257,7 +267,7 @@ export class Bridge {
     const prompt = body?.trim() || (media ? 'An attachment was sent. Describe what you can inspect, or ask what to do with it.' : '');
     if (!prompt || !(await o.isPrivateRoom(room, event.sender)) || !o.isAuthorized(event.sender, room)) return;
     if (background) {
-      if (this.active || this.stopped || o.isStopping?.() || (o.kind !== 'codex' && o.kind !== 'claude') ||
+      if (this.busy || this.pendingAdmissions > 0 || this.stopped || o.isStopping?.() || (o.kind !== 'codex' && o.kind !== 'claude') ||
         o.state.session(o.conversationKey?.(room, event) ?? o.linkedSession?.(room, event) ?? sessionKey(room, event))[o.kind] !== background.session || background.ready?.() === false) return;
     } else if (!fromQueue) {
       if (!o.state.claim(JSON.stringify([o.botId, event.event_id]))) return;

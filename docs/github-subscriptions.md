@@ -98,6 +98,13 @@ use the existing background recovery protocol: replay is possible, so agents mus
 inspect existing results before repeating external actions. This is not an
 exactly-once guarantee for actions performed by the model.
 
+Polling continues while the bot works, but agent notifications remain in the
+persistent inbox until it is idle. Human messages awaiting admission, queued
+follow-ups and queue draining take precedence. The bridge checks this again
+after asynchronous room-access validation, so a notification cannot overtake a
+human message that arrived during that check. Deferred notices are retried by
+the background pump; they do not steer an active turn.
+
 A notice summarizes up to five changed items and reports the total count. Agents
 should inspect all relevant PRs when a batch has more items. Notifications are
 external data, never human instructions or approval to publish or merge.
