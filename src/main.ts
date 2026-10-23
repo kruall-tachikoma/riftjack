@@ -452,7 +452,7 @@ async function main() {
       },
       async reply(room, event, text, markdown = false, msgtype = 'm.notice', mentions, sent) {
         const replyTo = threadRelation(event);
-        const contents = replyContent(mentions?.length ? mentionText(text, mentions) : text, markdown, true, msgtype);
+        const contents = replyContent(mentions?.length ? mentionText(text, mentions, id => links.displayName(id)) : text, markdown, true, msgtype);
         const replyId = randomBytes(9).toString('base64url');
         for (const [index, content] of contents.entries()) {
           if (!(await privateRoom(room, event.sender!))) throw new PublicError('Reply withheld because this is no longer an encrypted DM with an allowed account.');

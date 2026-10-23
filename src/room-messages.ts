@@ -1,4 +1,5 @@
 import { PublicError } from './errors.js';
+import { mentionContent } from './message-format.js';
 import { PEER_CREDIT, type ConversationLinks } from './conversation-links.js';
 import { GRANT, type MatrixEvent } from './bridge.js';
 import { attachmentDelivery } from './attachment-delivery.js';
@@ -16,7 +17,7 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
   context: { event: MatrixEvent; key: string }, transport: {
     allowed(room: string, sender: string): Promise<boolean>;
     stopping(): boolean;
-    send(room: string, content: { msgtype: 'm.text'; body: string; 'm.mentions': { user_ids: string[] }; [GRANT]?: ReturnType<ConversationLinks['reserve']> | ReturnType<ConversationLinks['reserveMentions']> }): Promise<string>;
+    send(room: string, content: { msgtype: 'm.text'; body: string; format?: 'org.matrix.custom.html'; formatted_body?: string; 'm.mentions': { user_ids: string[] }; [GRANT]?: ReturnType<ConversationLinks['reserve']> | ReturnType<ConversationLinks['reserveMentions']> }): Promise<string>;
     read?(room: string, eventId: string): Promise<MatrixEvent | undefined>;
     receive?(event: MatrixEvent, key: string, signal: AbortSignal, authorize: () => Promise<void>): Promise<IncomingAttachment>;
     maxBytes?: number;
@@ -77,7 +78,9 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
     // Use the running client's encryption state. Do not inherit private thread
     // relations, approvals or a human origin from the source room.
     const eventId = await transport.send(request.room, {
-      msgtype: 'm.text', body: recipients.length ? request.text + '\n\n' + recipients.join(' ') : request.text, 'm.mentions': { user_ids: recipients },
+      ...(recipients.length ? mentionContent(request.text, recipients.map(id => ({ id, name: links.displayName(id) })))
+        : { msgtype: 'm.text' as const, body: request.text }),
+      'm.mentions': { user_ids: recipients },
       ...(grants && { [GRANT]: grants.length === 1 ? grants[0] : grants }),
     });
     // Record executor correlation before returning the tool result, without

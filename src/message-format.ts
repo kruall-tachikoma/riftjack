@@ -5,6 +5,18 @@ import { messageParts } from './bridge.js';
 
 type Content = { msgtype: 'm.text' | 'm.notice'; body: string; format?: 'org.matrix.custom.html'; formatted_body?: string };
 const escape = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// Room tools accept literal text. Escape it and add only the connector-owned
+// named mention pills; never interpret agent-provided HTML here.
+export function mentionContent(text: string, recipients: { id: string; name: string }[]) {
+  return {
+    msgtype: 'm.text' as const,
+    body: text + '\n\n' + recipients.map(r => r.name).join(' '),
+    format: 'org.matrix.custom.html' as const,
+    formatted_body: escape(text).replace(/\n/g, '<br>') + '<br><br>' + recipients.map(r =>
+      `<a href="https://matrix.to/#/${escape(encodeURI(r.id))}">${escape(r.name)}</a>`).join(' '),
+  };
+}
+
 // Visible text of inline Markdown: formatting marks are dropped and link targets kept in brackets.
 function plainText(tokens: Token[]): string {
   return tokens.map(token => {
@@ -143,8 +155,9 @@ function splitHtml(html: string, msgtype: Content['msgtype']): Content[] {
       const tag = stack.at(-1);
       if (tag?.name !== name) return;
       append(`</${name}>`, '', false, false); stack.pop();
-      if (tag.href && tag.label !== tag.href) {
-        // Keep the fallback URL with its visible label. Splitting this suffix
+      if (tag.href && tag.label !== tag.href && !/^https:\/\/matrix\.to\/#\/@[^\s/]+:[^\s/]+$/.test(tag.href)) {
+        // Matrix user pills use their name in plain text; other links retain
+        // the fallback URL with their visible label. Splitting this suffix
         // alone would create an empty HTML message in formatted clients.
         const suffix = ` (${tag.href})`;
         body += suffix;

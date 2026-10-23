@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Parser } from 'htmlparser2';
-import { displayWidth, replyContent } from '../src/message-format.js';
+import { displayWidth, replyContent, mentionContent } from '../src/message-format.js';
 
 function balanced(html: string) {
   const stack: string[] = [];
@@ -157,4 +157,24 @@ test('operational messages remain literal, and oversized replies are truncated s
   assert.ok(parts.every(part => part.msgtype === 'm.text'));
   assert.match(parts.at(-1)!.body, /truncated/);
   assert.equal(parts.slice(0, -1).map(part => part.body).join('').trim().length, 200_000);
+});
+
+
+test('named Matrix pills keep only the name in the plain fallback', () => {
+  const [result] = replyContent('[Reviewer](https://matrix.to/#/@reviewer:example.org)', true);
+  assert.equal(result.body.trim(), 'Reviewer');
+  assert.match(result.formatted_body!, /<a href="https:\/\/matrix\.to\/#\/@reviewer:example.org">Reviewer<\/a>/);
+});
+
+
+test('room-tool mention labels and literal text are escaped without exposing raw IDs in the body', () => {
+  const content = mentionContent('<script>literal</script>\n**not markdown**', [
+    { id: '@reviewer:example.org', name: 'Reviewer <&>' },
+    { id: '@second:example.org', name: 'Second' },
+  ]);
+  assert.equal(content.body, '<script>literal</script>\n**not markdown**\n\nReviewer <&> Second');
+  assert.match(content.formatted_body, /&lt;script&gt;literal&lt;\/script&gt;<br>\*\*not markdown\*\*/);
+  assert.match(content.formatted_body, />Reviewer &lt;&amp;&gt;<\/a>/);
+  assert.doesNotMatch(content.formatted_body, /<script>|<strong>/);
+  balanced(content.formatted_body);
 });

@@ -195,7 +195,10 @@ including after conversation compaction. Bare JSON is ordinary message text.
 
 The connector removes the block, checks that each recipient is another configured agent
 of this room, and sends the reply with `m.mentions` and a visible pill on its
-last part, after any attachments. Only a top-level block counts: an example
+last part, after any attachments. Both final replies and `room_messages` use the
+configured bot name as the visible mention label (or “Agent” for a remote bot
+without a local account name). Matrix IDs remain in routing metadata and link
+targets. Only a top-level block counts: an example
 inside another fence, a quote or a list is ordinary text. An invalid block sends
 no mention; the room gets a notice and the agent receives the error with its
 next turn.

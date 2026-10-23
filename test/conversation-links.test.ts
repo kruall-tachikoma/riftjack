@@ -248,7 +248,7 @@ test('an agent can return a result to its own private chat, but not mention anyo
 });
 
 test('an outbound room message can mention the peer only with peer credit', async t => {
-  const f = fixture(t), signal = new AbortController().signal, sent: object[] = [];
+  const f = pair(t), signal = new AbortController().signal, sent: object[] = [];
   const action = linkedRoomMessages(f.links, bot, { event: message('Tell the reviewer'), key: canonical }, {
     stopping: () => false, allowed: async (room, sender) => f.links.allowed(bot, room, sender, async () => roomState()),
     send: async (_room, content) => { sent.push(content); return '$sent'; },
@@ -261,7 +261,10 @@ test('an outbound room message can mention the peer only with peer credit', asyn
   assert.equal(f.links.peerCredit(bot), PEER_CREDIT - 1);
   const [content] = sent as Record<string, unknown>[];
   assert.equal(typeof content[GRANT], 'object');
-  assert.deepEqual({ ...content, [GRANT]: undefined }, { msgtype: 'm.text', body: 'Please review.\n\n' + peer, 'm.mentions': { user_ids: [peer] }, [GRANT]: undefined });
+  assert.equal(content.body, 'Please review.\n\nReviewer');
+  assert.equal(content.format, 'org.matrix.custom.html');
+  assert.equal(content.formatted_body, 'Please review.<br><br><a href="https://matrix.to/#/@reviewer:test">Reviewer</a>');
+  assert.deepEqual(content['m.mentions'], { user_ids: [peer] });
   // More mentions than credit cannot be sent ahead of their delivery.
   for (let i = 1; i < PEER_CREDIT; i++) await send('paid-' + i);
   await assert.rejects(send('over-budget'), /no peer credit/);
@@ -730,7 +733,7 @@ test('mention blocks are validated, removed and reported back to the agent', t =
   assert.equal(reply[REPLY], 'r1');
   assert.equal(links.outgoing(bot, group, { msgtype: 'm.notice', body: 'x' }, undefined, 'r1')[REPLY], undefined);
   assert.deepEqual(links.outgoing(bot, home, { msgtype: 'm.text', body: 'x' }, [peer]), { msgtype: 'm.text', body: 'x' });
-  assert.match(mentionText('Answer', [peer]), /\[@reviewer:test\]\(https:\/\/matrix\.to\/#\/@reviewer:test\)$/);
+  assert.match(mentionText('Answer', [peer], id => links.displayName(id)), /\[Reviewer\]\(https:\/\/matrix\.to\/#\/@reviewer:test\)$/);
 });
 
 test('peer-started turns may stay silent, never steer and cannot be injected from Matrix', async t => {
@@ -772,7 +775,7 @@ test('peer-started turns may stay silent, never steer and cannot be injected fro
 test('an outgoing reply with a mention block starts the peer turn after attachments', async t => {
   const f = pair(t), sent: string[] = [], peerPrompts: string[] = [], events: MatrixEvent[] = [];
   const replyContentFor = (room: string, event: MatrixEvent, text: string, msgtype: 'm.text' | 'm.notice', mentions?: string[]) => {
-    const contents = replyContent(mentions?.length ? mentionText(text, mentions) : text, true, true, msgtype);
+    const contents = replyContent(mentions?.length ? mentionText(text, mentions, id => f.links.displayName(id)) : text, true, true, msgtype);
     return contents.map((content, index) => f.links.outgoing(bot, room, content, index === contents.length - 1 ? mentions : undefined, 'reply-' + events.length));
   };
   // The human's message to the builder gives it credit to start the reviewer.
@@ -803,6 +806,9 @@ test('an outgoing reply with a mention block starts the peer turn after attachme
   const reply = events.at(-1)!;
   assert.deepEqual(reply.content!['m.mentions'], { user_ids: [peer] });
   assert.ok(!reply.content!.body!.includes('matrix-mentions'));
+  assert.match(reply.content!.body!, /Reviewer/);
+  assert.ok(!reply.content!.body!.includes(peer));
+  assert.match((reply.content as unknown as { formatted_body: string }).formatted_body, /<a href="https:\/\/matrix\.to\/#\/@reviewer:test">Reviewer<\/a>/);
   // The same path main.ts uses for the peer's incoming Matrix event.
   assert.equal(f.links.observe(peer, group, reply), true);
   await reviewer.handleAgentMention(group, f.links.mention(peer, group, reply)!);

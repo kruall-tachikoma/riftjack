@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { Marked, type Token, type Tokens } from 'marked';
+import { markdownText } from './manager-format.js';
 import type { Account } from './accounts.js';
 import { PublicError } from './errors.js';
 import { randomUUID } from 'node:crypto';
@@ -49,8 +50,8 @@ const QUOTE_LIMIT = 8000;
 const isMentionBlock = (token: Token): token is Tokens.Code => token.type === 'code' && token.lang?.trim() === 'matrix-mentions';
 
 // Visible Matrix pills for the validated recipients of a final reply.
-export function mentionText(text: string, mentions: string[]): string {
-  return [text, mentions.map(id => `[${id}](https://matrix.to/#/${id})`).join(' ')].filter(Boolean).join('\n\n');
+export function mentionText(text: string, mentions: string[], name: (id: string) => string): string {
+  return [text, mentions.map(id => `[${markdownText(name(id))}](https://matrix.to/#/${encodeURI(id)})`).join(' ')].filter(Boolean).join('\n\n');
 }
 
 // Room membership is an explicit allowlist, including invited and knocking users.
@@ -137,6 +138,7 @@ export class ConversationLinks {
     return wires;
   }
   agent(bot: string) { return this.config.agents.find(a => a.bot === bot); }
+  displayName(bot: string): string { return this.accounts.find(a => a.userId === bot)?.name.trim().slice(0, 100) || 'Agent'; }
   room(bot: string, room: string) { return this.config.rooms.find(r => r.room === room && r.bots.includes(bot)); }
   sharedRooms(bot: string): string[] { return this.config.rooms.filter(r => r.bots.includes(bot)).map(r => r.room); }
   private anchor(a: Agent) { return JSON.stringify([a.home, a.owner, a.thread ?? null]); }
