@@ -349,6 +349,10 @@ confirmation prompts are not targets. Reaction delivery is best-effort; failure
 does not resend the reply. Grok worker replies are marked after their last part
 is delivered too.
 
+Set `TURN_COMPLETION_REACTIONS=false` in the instance `.env` to disable these
+reactions for all bots, then restart Riftjack. The default is `true`; there is
+no per-bot override.
+
 For Codex, Claude and Bot Manager, “typing” means the bot is processing a request
 or awaiting confirmation within that request. The standard Matrix indicator
 covers an active task, including tool calls, preparation and final delivery.

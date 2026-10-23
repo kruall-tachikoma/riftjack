@@ -242,6 +242,7 @@ async function main() {
         : undefined;
     };
     const turnCompleted = async (room: string, eventId: string, sender: string) => {
+      if (!config.turnCompletionReactions) return;
       if (stopping || restart.pending || !(await privateRoom(room, sender))) return;
       if (stopping || restart.pending) return;
       await client.sendRawEvent(room, 'm.reaction', {
