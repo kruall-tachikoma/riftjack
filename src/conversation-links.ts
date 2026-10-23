@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { AGENT_TRIGGER, GRANT, NOTICE, REPLY, SERVICE, type MatrixEvent, type Mentions } from './bridge.js';
 import type { State } from './state.js';
 import { isPrivateRoomState } from './private-room.js';
-import { PEER_CREDIT, MENTION_REPLY_LIMIT } from './routing-instructions.js';
+import { PEER_CREDIT, MENTION_REPLY_LIMIT, peerMentionReminder } from './routing-instructions.js';
 export { PEER_CREDIT, MENTION_REPLY_LIMIT } from './routing-instructions.js';
 
 type Agent = { bot: string; owner: string; home: string; session: string; thread?: string };
@@ -378,6 +378,7 @@ export class ConversationLinks {
         trigger: trigger ? 'agent-mention' : notice ?? 'human-message', ...(shared && { participants: roomMembers(shared) }),
         ...(unread.length && { unreadSharedMessages: unread }), ...(remainingMessages && { remainingMessages }), ...(shared && { peerCredit: this.peerCredit(bot) }), ...(shownBefore && { alreadyDelivered: true }),
         ...(connectorNotes.length && { connectorNotes }) })
+      + (shared ? '\n' + peerMentionReminder + '\n' : '')
       + (trigger || notice ? '\nCurrent connector notice:\n' : '\nCurrent human message:\n')
       + (shownBefore ? 'This mention was already shown to you as an unread observation in an earlier turn. '
         + 'If you have already answered it, a second answer is not needed: reply with exactly NO_REPLY.\n' : '') + prompt;

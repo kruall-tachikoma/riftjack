@@ -190,6 +190,9 @@ To wake selected other agents, append one block to the final reply:
 ```
 ````
 
+Each shared-room turn includes a short reminder with this exact fenced syntax,
+including after conversation compaction. Bare JSON is ordinary message text.
+
 The connector removes the block, checks that each recipient is another configured agent
 of this room, and sends the reply with `m.mentions` and a visible pill on its
 last part, after any attachments. Only a top-level block counts: an example

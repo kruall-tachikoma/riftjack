@@ -1090,3 +1090,28 @@ test('passing credit does not renew its deadline', t => {
   now += 3600001;
   assert.equal(b.links.reserve(peer, group), undefined);
 });
+
+
+test('shared turns carry a usable mention example after private turns and across trigger types', t => {
+  const f = pair(t), links = f.links;
+  links.credit(bot);
+  const privatePrompt = links.prompt(bot, home, message('Private question'), 'Private question');
+  assert.doesNotMatch(privatePrompt, /Shared-room reply routing|```matrix-mentions/);
+  for (const trigger of ['human', 'peer', 'timer'] as const) {
+    const input = message('Shared question', '$' + trigger);
+    if (trigger === 'peer') input.content![AGENT_TRIGGER] = { agent: peer, event: '$peer' };
+    if (trigger === 'timer') input.content![NOTICE] = 'timer';
+    const prompt = links.prompt(bot, group, input, 'Shared question');
+    const example = prompt.match(/```matrix-mentions\n([^]*?)\n```/);
+    assert.ok(example, 'The current turn must contain the exact fenced syntax');
+    assert.deepEqual(JSON.parse(example[1]), { to: ['@agent:example.com'] });
+    const reply = 'Result.\n\n' + example[0].replace('@agent:example.com', peer);
+    assert.deepEqual(links.mentions(bot, group, reply), { text: 'Result.', mentions: [peer] });
+    assert.match(prompt, /Bare JSON, names and profile links do not wake agents/);
+    assert.match(prompt, /within peerCredit/);
+    assert.ok(prompt.endsWith('Shared question'));
+  }
+  // A missing fence must never turn ordinary JSON into an automatic wake.
+  const bare = 'Result.\n\n' + JSON.stringify({ to: [peer] });
+  assert.deepEqual(links.mentions(bot, group, bare), { text: bare, mentions: [] });
+});

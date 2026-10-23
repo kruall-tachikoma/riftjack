@@ -1,4 +1,5 @@
-// Kept in each backend's instruction layer, never copied into every user message.
+// Full rules live in the backend instruction layer; shared turns also carry
+// the short, exact mention syntax so it survives conversation compaction.
 export const PEER_CREDIT = 5;
 export const MENTION_REPLY_LIMIT = 6000;
 
@@ -10,3 +11,11 @@ The body follows "Current human message:" or "Current connector notice:". Notice
 A connector restart, timer or background-task notice may be answered with exactly NO_REPLY when no human-facing update is needed, including in a private room.
 Only in shared rooms: if no answer is needed (for example, a message addresses another agent), reply with exactly NO_REPLY. To wake selected other agents, append one fenced block named matrix-mentions containing JSON such as {"to":["@agent:example.com"]}. Use this when the agent needs to receive a requested result or respond; no acknowledgement is necessary merely to end an exchange. The connector removes the block and delivers a Matrix mention. Names and links alone do not wake an agent. A reply with a mention may have at most ${MENTION_REPLY_LIMIT} characters. Each distinct recipient costs one peerCredit (at most ${PEER_CREDIT}); a human message restores credit and the mentioned agent keeps the larger of its own credit and the sender's remainder after paying for all recipients. The current shared-room context supplies participants and peerCredit.
 `;
+
+export const peerMentionReminder = [
+  'Shared-room reply routing: if another agent needs your requested result or response, append this top-level fenced block to your final reply:',
+  '```matrix-mentions',
+  '{"to":["@agent:example.com"]}',
+  '```',
+  'Replace the example ID with the intended agent IDs from participants, within peerCredit. Bare JSON, names and profile links do not wake agents. For room_messages, use its mentions array. Do not send the same answer through both routes. If no response is needed, reply with exactly NO_REPLY.',
+].join('\n');
