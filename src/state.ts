@@ -8,7 +8,7 @@ export type Session = { codex?: string; codexInstructionsHash?: string; claude?:
 export type Pending = { room: string; event: MatrixEvent; feedback: boolean };
 type Recoverable = Pending & { attempted: boolean };
 type TurnReactionState = { room: string; eventId: string };
-type Data = { turnReactions?: Record<string, TurnReactionState>; version: 1; sessions: Record<string, Session>; seen: string[]; pending?: Record<string, Pending[]>; messages?: Record<string, Recoverable[]>; messageSince?: Record<string, number>; roomHeads?: Record<string, Record<string, string>> };
+type Data = { turnReactions?: Record<string, TurnReactionState | TurnReactionState[]>; homeReplies?: Record<string, TurnReactionState>; version: 1; sessions: Record<string, Session>; seen: string[]; pending?: Record<string, Pending[]>; messages?: Record<string, Recoverable[]>; messageSince?: Record<string, number>; roomHeads?: Record<string, Record<string, string>> };
 
 export class State {
   private data: Data;
@@ -19,14 +19,21 @@ export class State {
       throw new Error('Invalid state file. Restore it from a backup before restarting.');
     }
   }
-  turnReaction(bot: string): TurnReactionState | undefined {
-    const marker = this.data.turnReactions?.[bot];
-    return marker && { ...marker };
+  turnReactions(bot: string): TurnReactionState[] {
+    const markers = this.data.turnReactions?.[bot];
+    return (Array.isArray(markers) ? markers : markers ? [markers] : []).map(marker => ({ ...marker }));
   }
-  saveTurnReaction(bot: string, marker: TurnReactionState | undefined) {
-    if (marker) (this.data.turnReactions ??= {})[bot] = marker;
+  saveTurnReactions(bot: string, markers: TurnReactionState[]) {
+    if (markers.length) (this.data.turnReactions ??= {})[bot] = markers;
     else if (this.data.turnReactions) delete this.data.turnReactions[bot];
     this.save();
+  }
+  homeReply(bot: string): TurnReactionState | undefined {
+    const reply = this.data.homeReplies?.[bot];
+    return reply && { ...reply };
+  }
+  saveHomeReply(bot: string, reply: TurnReactionState) {
+    (this.data.homeReplies ??= {})[bot] = { ...reply }; this.save();
   }
   messageSince(bot: string, now: number): number {
     const since = (this.data.messageSince ??= {})[bot] ??= now;

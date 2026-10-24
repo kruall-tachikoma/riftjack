@@ -247,12 +247,14 @@ async function main() {
         'm.relates_to': { rel_type: 'm.annotation', event_id: eventId, key: '🟦' },
       }),
       remove: (room, eventId) => client.redactEvent(room, eventId),
-    });
+    }, linkedAgent?.home);
     const turnStarted = () => turnReaction.started();
     const turnCompleted = (room: string, eventId: string, sender: string, idle = () => bridge instanceof Bridge && !bridge.pendingTurns) =>
-      turnReaction.completed(room, eventId, async () => {
+      turnReaction.completed(room, eventId, async target => {
         if (!config.turnCompletionReactions || stopping || restart.pending || !idle()) return false;
-        return await privateRoom(room, sender) && !stopping && !restart.pending && idle();
+        const permitted = target === room ? await privateRoom(target, sender)
+          : !!linkedAgent && await isPrivateRoom(client, target, account.userId, linkedAgent.owner, authorized);
+        return permitted && !stopping && !restart.pending && idle();
       });
     let bridge: Bridge | WorkerBridge;
     if (account.kind === 'grok') {
@@ -329,13 +331,14 @@ async function main() {
         allowed: privateRoom, stopping: () => stopping || restart.pending,
         send: async (room, content) => {
           const eventId = await client.sendMessage(room, content);
+          turnReaction.rememberReply(room, eventId);
           context.sent(room, eventId);
           return eventId;
         },
         read: reactionTarget,
         receive: (event, key, signal, authorize) => media.receive(event.content!, key, signal, authorize),
         maxBytes: botConfig.maxMediaBytes,
-        sendFiles: (room, files, signal, authorize) => media.send(room, files, undefined, signal, authorize, eventId => context.sent(room, eventId)),
+        sendFiles: (room, files, signal, authorize) => media.send(room, files, undefined, signal, authorize, eventId => { turnReaction.rememberReply(room, eventId); context.sent(room, eventId); }),
       })(request, signal) : undefined,
       mentions: linkedAgent ? (room, text) => links.mentions(account.userId, room, text) : undefined,
       shared: linkedAgent ? room => !!links.room(account.userId, room) : undefined,
@@ -442,7 +445,7 @@ async function main() {
       turnCompleted,
       sendAttachments: (room, event, files, signal, sent) => media.send(room, files, threadRelation(event), signal, async () => {
         if (!(await privateRoom(room, event.sender!))) throw new PublicError('Attachment withheld because this is no longer an encrypted DM with an allowed account.');
-      }, sent),
+      }, eventId => { turnReaction.rememberReply(room, eventId); sent?.(eventId); }),
       async confirmation(room, event, text, controls, markdown) {
         await sendConfirmation(text, controls, {
           authorize: async () => {
@@ -467,6 +470,7 @@ async function main() {
           // Only the last part mentions a peer, after the complete reply is delivered.
           const eventId = await client.sendMessage(room, { ...links.outgoing(account.userId, room, content,
             index === contents.length - 1 ? mentions : undefined, replyId), 'm.relates_to': replyTo });
+          turnReaction.rememberReply(room, eventId);
           sent?.(eventId);
         }
       },

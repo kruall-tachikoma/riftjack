@@ -342,10 +342,15 @@ Files are kept under each bot’s workspace in `.matrix-media/`, in separate inc
 
 After a successful agent turn, Riftjack adds a 🟦 reaction to the last message
 sent by that turn, including attachments and messages sent through room tools.
-It removes that reaction before the agent starts its next task, even in another
-linked room. Only the current idle marker is kept; queued follow-ups do not get
-intermediate markers. The reaction ID is saved so it can be removed after a
-connector restart.
+For an agent with a linked private home room, it also marks the last agent
+message in that home, so its idle status remains visible there after a shared
+room reply. A reply in the home gets just one marker. If no home reply has been
+recorded yet, only the reply room is marked; no extra message is created.
+
+Riftjack removes both reactions before the agent starts its next task, in any
+linked room. Queued follow-ups do not get intermediate markers. Reaction IDs
+and the last home reply are saved across connector restarts. The home is checked
+to still be an authorized private room before a mirrored reaction is sent.
 
 The marker appears after final delivery. It means the agent is idle, not that
 its broader task is finished. A silent turn with no messages, a failed or
