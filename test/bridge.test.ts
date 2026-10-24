@@ -1203,12 +1203,12 @@ test('a failed completion reaction does not replay a completed recoverable turn'
   assert.equal(runs, 1);
 });
 
-test('queued follow-up turns receive separate completion markers', async t => {
+test('queued follow-up turns only mark the final idle response', async t => {
   const started = gate(), finish = gate(), marked: string[] = [];
   let count = 0;
   const f = fixture(t, 'claude', async () => {
     if (++count === 1) { started.release(); await finish.promise; }
-    else assert.deepEqual(marked, ['$reply1']);
+    else assert.deepEqual(marked, []);
     return 'reply' + count;
   }, true, {
     steer: async () => false,
@@ -1218,7 +1218,45 @@ test('queued follow-up turns receive separate completion markers', async t => {
   const task = f.bridge.handle('!dm:test', event()); await started.promise;
   await f.bridge.handle('!dm:test', event('follow-up', '$2'));
   finish.release(); await task;
-  assert.deepEqual(marked, ['$reply1', '$reply2']);
+  assert.deepEqual(marked, ['$reply2']);
+});
+
+test('a follow-up arriving during marker delivery clears it before the next turn', async t => {
+  const sending = gate(), finish = gate();
+  let turns = 0, marker = false, starts = 0;
+  const f = fixture(t, 'claude', async () => {
+    assert.equal(marker, false);
+    return 'reply' + ++turns;
+  }, true, {
+    steer: async () => false,
+    turnStarted: async () => { starts++; marker = false; },
+    reply: async (_room, _event, text, _markdown, _msgtype, _mentions, sent) => { sent?.('$' + text); },
+    turnCompleted: async () => {
+      if (turns === 1) { sending.release(); await finish.promise; }
+      marker = true;
+    },
+  });
+  const task = f.bridge.handle('!dm:test', event()); await sending.promise;
+  await f.bridge.handle('!dm:test', event('follow-up', '$2'));
+  assert.equal(f.bridge.pendingTurns, true);
+  finish.release(); await task;
+  assert.equal(turns, 2); assert.equal(starts, 2);
+  assert.equal(marker, true); assert.equal(f.bridge.pendingTurns, false);
+});
+
+for (const failure of [false, true]) test(`task start clears the previous marker before backend work (failure=${failure})`, async t => {
+  let starts = 0;
+  const f = fixture(t, 'codex', async () => {
+    assert.equal(starts, 1); return 'NO_REPLY';
+  }, true, {
+    shared: () => true,
+    turnStarted: async () => { starts++; if (failure) throw new Error('remove failed'); },
+  });
+  await f.bridge.handle('!dm:test', event('!status', '$command'));
+  assert.equal(starts, 0);
+  await f.bridge.handle('!dm:test', event());
+  assert.equal(starts, 1);
+  assert.equal(f.errors.length, failure ? 1 : 0);
 });
 
 test('a tool-only attachment turn marks its last delivered attachment', async t => {

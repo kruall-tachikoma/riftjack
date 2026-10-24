@@ -15,6 +15,7 @@ import { MatrixClient, SimpleFsStorageProvider, RustSdkCryptoStorageProvider, Lo
 import { StoreType } from '@matrix-org/matrix-sdk-crypto-nodejs';
 import { loadConfig, type Config } from './config.js';
 import { State } from './state.js';
+import { TurnReaction } from './turn-reaction.js';
 import { WorkerBridge } from './worker-bridge.js';
 import { WorkerMatrixClient } from './worker-matrix-client.js';
 import { MessageMatrixClient } from './message-matrix-client.js';
@@ -241,14 +242,18 @@ async function main() {
         ? { rel_type: 'm.thread', event_id: relation.event_id }
         : undefined;
     };
-    const turnCompleted = async (room: string, eventId: string, sender: string) => {
-      if (!config.turnCompletionReactions) return;
-      if (stopping || restart.pending || !(await privateRoom(room, sender))) return;
-      if (stopping || restart.pending) return;
-      await client.sendRawEvent(room, 'm.reaction', {
+    const turnReaction = new TurnReaction(state, account.userId, {
+      send: (room, eventId) => client.sendRawEvent(room, 'm.reaction', {
         'm.relates_to': { rel_type: 'm.annotation', event_id: eventId, key: '🟦' },
+      }),
+      remove: (room, eventId) => client.redactEvent(room, eventId),
+    });
+    const turnStarted = () => turnReaction.started();
+    const turnCompleted = (room: string, eventId: string, sender: string, idle = () => bridge instanceof Bridge && !bridge.pendingTurns) =>
+      turnReaction.completed(room, eventId, async () => {
+        if (!config.turnCompletionReactions || stopping || restart.pending || !idle()) return false;
+        return await privateRoom(room, sender) && !stopping && !restart.pending && idle();
       });
-    };
     let bridge: Bridge | WorkerBridge;
     if (account.kind === 'grok') {
       const workerDir = join(dir, 'worker');
@@ -281,7 +286,9 @@ async function main() {
           const result = await client.doRequest('PUT', '/_matrix/client/v3/rooms/' + encodeURIComponent(task.room) + '/send/m.room.encrypted/' + encodeURIComponent(transaction), null, encrypted);
           return result.event_id as string;
         },
-        completed: (task, eventId) => turnCompleted(task.room, eventId, task.event.sender!),
+        started: turnStarted,
+        completed: (task, eventId) => turnCompleted(task.room, eventId, task.event.sender!,
+          () => !queue.list().some(task => ['queued', 'leased', 'replied'].includes(task.status))),
         report: diagnostics,
       });
       workers.set(account.userId, service); workerServer.add(account.userId, token, service);
@@ -431,6 +438,7 @@ async function main() {
       },
       receive: (event, key, signal, authorize) => media.receive(event.content!, key, signal, authorize),
       transcribe: (file, signal) => audio ? audio.transcribe(file, signal) : Promise.resolve(file),
+      turnStarted,
       turnCompleted,
       sendAttachments: (room, event, files, signal, sent) => media.send(room, files, threadRelation(event), signal, async () => {
         if (!(await privateRoom(room, event.sender!))) throw new PublicError('Attachment withheld because this is no longer an encrypted DM with an allowed account.');

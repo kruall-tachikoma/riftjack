@@ -7,7 +7,8 @@ import { AGENT_TRIGGER, NOTICE, type MatrixEvent } from './bridge.js';
 export type Session = { codex?: string; codexInstructionsHash?: string; claude?: string; grok?: string; codexReport?: EngineReport; claudeReport?: EngineReport; codexCheckpoint?: CheckpointState; claudeCheckpoint?: CheckpointState };
 export type Pending = { room: string; event: MatrixEvent; feedback: boolean };
 type Recoverable = Pending & { attempted: boolean };
-type Data = { version: 1; sessions: Record<string, Session>; seen: string[]; pending?: Record<string, Pending[]>; messages?: Record<string, Recoverable[]>; messageSince?: Record<string, number>; roomHeads?: Record<string, Record<string, string>> };
+type TurnReactionState = { room: string; eventId: string };
+type Data = { turnReactions?: Record<string, TurnReactionState>; version: 1; sessions: Record<string, Session>; seen: string[]; pending?: Record<string, Pending[]>; messages?: Record<string, Recoverable[]>; messageSince?: Record<string, number>; roomHeads?: Record<string, Record<string, string>> };
 
 export class State {
   private data: Data;
@@ -17,6 +18,15 @@ export class State {
     if (this.data.version !== 1 || !this.data.sessions || !Array.isArray(this.data.seen)) {
       throw new Error('Invalid state file. Restore it from a backup before restarting.');
     }
+  }
+  turnReaction(bot: string): TurnReactionState | undefined {
+    const marker = this.data.turnReactions?.[bot];
+    return marker && { ...marker };
+  }
+  saveTurnReaction(bot: string, marker: TurnReactionState | undefined) {
+    if (marker) (this.data.turnReactions ??= {})[bot] = marker;
+    else if (this.data.turnReactions) delete this.data.turnReactions[bot];
+    this.save();
   }
   messageSince(bot: string, now: number): number {
     const since = (this.data.messageSince ??= {})[bot] ??= now;

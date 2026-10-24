@@ -342,12 +342,20 @@ Files are kept under each bot’s workspace in `.matrix-media/`, in separate inc
 
 After a successful agent turn, Riftjack adds a 🟦 reaction to the last message
 sent by that turn, including attachments and messages sent through room tools.
-The marker appears after final delivery. It means the turn has ended, not that
-the agent's broader task is finished. A silent turn with no messages, a failed
-or cancelled turn, and local commands receive no marker. Service notices and
-confirmation prompts are not targets. Reaction delivery is best-effort; failure
-does not resend the reply. Grok worker replies are marked after their last part
-is delivered too.
+It removes that reaction before the agent starts its next task, even in another
+linked room. Only the current idle marker is kept; queued follow-ups do not get
+intermediate markers. The reaction ID is saved so it can be removed after a
+connector restart.
+
+The marker appears after final delivery. It means the agent is idle, not that
+its broader task is finished. A silent turn with no messages, a failed or
+cancelled turn, and local commands receive no marker. Service notices and
+confirmation prompts are not targets. Matrix reaction updates are best-effort:
+a network failure can leave a stale marker until the next attempt, but does not
+replay a reply or prevent a task from running. Grok workers clear the marker
+before receiving a task and add one after final delivery only when their queue
+has no outstanding tasks. Reactions from versions that did not save their IDs
+are left in the room history.
 
 Set `TURN_COMPLETION_REACTIONS=false` in the instance `.env` to disable these
 reactions for all bots, then restart Riftjack. The default is `true`; there is

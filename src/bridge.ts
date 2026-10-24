@@ -48,6 +48,7 @@ type Options = {
   isStopping?: () => boolean;
   restart?: (reply: (text: string) => Promise<void>, target: RestartTarget, scope: RestartScope) => Promise<void>;
   reply: (room: string, event: MatrixEvent, text: string, markdown?: boolean, msgtype?: 'm.text' | 'm.notice', mentions?: string[], sent?: (eventId: string) => void) => Promise<void>;
+  turnStarted?: () => Promise<void>;
   turnCompleted?: (room: string, eventId: string, sender: string) => Promise<void>;
   typing?: (room: string, typing: boolean, timeout: number) => Promise<unknown>;
   confirmation?: (room: string, event: MatrixEvent, text: string, controls: ReactionControls, markdown: string) => Promise<void>;
@@ -116,6 +117,7 @@ export class Bridge {
   private reply(...args: Parameters<Options['reply']>): Promise<void> {
     return this.deliver(args[0], () => this.options.reply(...args));
   }
+  get pendingTurns(): boolean { return !!this.active?.followups.length || this.options.state.queued(this.options.botId) > 0; }
   get busy(): boolean { return !!this.active || this.draining || (!!(this.options.linkedSession || this.options.recoverMessages) && this.options.state.queued(this.options.botId) > 0); }
   stop() { this.avatarUploads.clear(); this.stopped = true; this.active?.controller.abort(); }
   revoke(sender: string) {
@@ -438,6 +440,7 @@ export class Bridge {
       controller.abort();
     }, o.timeoutMs);
     try {
+      try { await o.turnStarted?.(); } catch (error) { o.report(error); }
       background?.admitted();
       if (verb === 'publish') await reply('Preparing the complete publication review…');
       const attachments: IncomingAttachment[] = [];
@@ -448,6 +451,9 @@ export class Bridge {
         ? 'Connector recovery after restart: the previous turn for this message did not finish successfully. It may have performed actions or sent replies already. Inspect the existing results before continuing; do not blindly repeat external actions or reuse expired confirmations. Original message follows:\n\n' + initialPrompt
         : initialPrompt, event, attachments };
       while (next) {
+        if (next.event !== event) {
+          try { await o.turnStarted?.(); } catch (error) { o.report(error); }
+        }
         controller.signal.throwIfAborted();
         await this.authorize(room, current);
         current.running = true;
@@ -585,7 +591,7 @@ export class Bridge {
         // Checkpoint the notification before processing human follow-ups: a
         // later follow-up failure must not replay an already completed notice.
         if (responseEvent === event) background?.completed?.();
-        if (!command && lastMessage && o.turnCompleted) {
+        if (!command && lastMessage && o.turnCompleted && !current.followups.length && !o.state.queued(o.botId)) {
           try {
             await this.authorize(room, current);
             await o.turnCompleted(lastMessage.room, lastMessage.eventId, current.sender);

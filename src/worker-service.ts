@@ -10,6 +10,7 @@ export type WorkerTransport = {
   transcribe?: (file: IncomingAttachment, signal: AbortSignal) => Promise<IncomingAttachment>;
   prepare: (task: WorkerTask) => Promise<unknown[]>;
   send: (task: WorkerTask, transaction: string, encrypted: unknown) => Promise<string | void>;
+  started?: () => Promise<void>;
   completed?: (task: WorkerTask, eventId: string) => Promise<void>;
   report: (error: unknown) => void;
 };
@@ -37,6 +38,9 @@ export class WorkerService {
       catch (error) { if (error instanceof WorkerError && error.status === 403) return null; throw error; }
       const task = this.queue.claim(candidate.id);
       if (!task) return null;
+      try { await this.transport.started?.(); } catch (error) { this.transport.report(error); }
+      await this.allowed(task);
+      this.queue.checkLease(task.id, task.lease!);
       return { id: task.id, conversation: task.conversation, sender: task.event.sender,
         text: task.event.content?.body || '', hasAttachment: !!task.event.content?.file,
         lease: task.lease, leaseUntil: task.leaseUntil, attempt: task.attempt };

@@ -284,6 +284,25 @@ test('worker status reports only this conversation queue and does not claim mode
   assert.equal(replies.length, 2);
 });
 
+for (const failure of [false, true]) test(`worker clears the idle marker before returning a claimed task (failure=${failure})`, async t => {
+  const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
+  t.after(() => queue.close());
+  let starts = 0;
+  const errors: unknown[] = [];
+  const service = new WorkerService(queue, join(dir, 'files'), 100, {
+    allowed: async () => true, receive: async () => undefined,
+    prepare: async () => [], send: async () => {},
+    started: async () => { starts++; if (failure) throw new Error('remove failed'); },
+    report: error => errors.push(error),
+  });
+  assert.equal(await service.claim(), null); assert.equal(starts, 0);
+  queue.enqueue('!dm:test', event(), 'c');
+  const claimed = await service.claim();
+  assert.ok(claimed); assert.equal(starts, 1);
+  assert.equal(errors.length, failure ? 1 : 0);
+  service.stop();
+});
+
 for (const failure of [false, true]) test(`worker marks only its last durable reply part (reaction failure=${failure})`, async t => {
   const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
   t.after(() => queue.close());
