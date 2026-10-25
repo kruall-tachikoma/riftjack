@@ -1,13 +1,54 @@
+import { safeErrorSummary } from './errors.js';
+
+export type TypingMeasurement = {
+  event: 'typing-update'; typing: boolean; status: 'success' | 'skipped' | 'failed' | 'timeout';
+  phase: 'authorize' | 'send'; elapsedMs: number; sinceLastSuccessMs?: number; diagnostic?: string;
+};
+const REQUEST_TIMEOUT_MS = 8_000;
+
+// A late room authorization read must never start a late send.
+function authorizeWithin(check: Promise<boolean>, signal: AbortSignal): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    if (signal.aborted) { abort(); return; }
+    signal.addEventListener('abort', abort, { once: true });
+    check.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+  });
+}
+
 // Matrix typing is room-scoped, expires on the server and never carries task text.
-export function taskTyping(send: (typing: boolean, timeout: number) => Promise<unknown>,
-  allowed: () => Promise<boolean>, report: (error: unknown) => void, signal: AbortSignal) {
+export function taskTyping(send: (typing: boolean, timeout: number, signal: AbortSignal) => Promise<unknown>,
+  allowed: () => Promise<boolean>, report: (error: unknown) => void, signal: AbortSignal,
+  measure?: (measurement: TypingMeasurement) => void) {
   let closed = false, pending: Promise<void> | undefined, closing: Promise<void> | undefined;
   let deliveries = 0, resumeTimer: ReturnType<typeof setTimeout> | undefined;
   const active = () => !closed && !signal.aborted;
+  let lastSuccess: number | undefined;
   const update = async (typing: boolean) => {
+    const started = performance.now(), deadline = new AbortController();
+    const timeout = setTimeout(() => deadline.abort(new DOMException('Typing update timed out', 'TimeoutError')), REQUEST_TIMEOUT_MS);
+    timeout.unref();
+    let phase: TypingMeasurement['phase'] = 'authorize';
+    const measurement = (status: TypingMeasurement['status'], error?: unknown) => {
+      try { measure?.({ event: 'typing-update', typing, status, phase,
+        elapsedMs: Math.round(performance.now() - started),
+        ...(lastSuccess !== undefined && { sinceLastSuccessMs: Math.round(performance.now() - lastSuccess) }),
+        ...(error !== undefined && { diagnostic: safeErrorSummary(error) }) }); }
+      catch { /* Logging must not affect task or indicator delivery. */ }
+    };
     try {
-      if (await allowed() && (!typing || (active() && !deliveries))) await send(typing, 30_000);
-    } catch (error) { report(error); }
+      const permitted = await authorizeWithin(allowed(), deadline.signal);
+      deadline.signal.throwIfAborted();
+      if (!permitted || (typing && (!active() || deliveries))) { measurement('skipped'); return; }
+      phase = 'send';
+      // Abort the actual HTTP request; do not detach it with Promise.race.
+      await send(typing, 30_000, deadline.signal);
+      deadline.signal.throwIfAborted();
+      measurement('success'); lastSuccess = performance.now();
+    } catch (error) {
+      measurement(deadline.signal.aborted ? 'timeout' : 'failed', error);
+      report(error);
+    } finally { clearTimeout(timeout); }
   };
   const enqueue = (typing: boolean) => {
     const next = (pending ? pending.then(() => update(typing)) : update(typing)).finally(() => {
@@ -40,7 +81,7 @@ export function taskTyping(send: (typing: boolean, timeout: number) => Promise<u
       }
     }
   };
-  const timer = setInterval(refresh, 15_000);
+  const timer = setInterval(refresh, 10_000);
   timer.unref();
   const close = () => {
     if (closing) return closing;

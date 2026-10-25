@@ -371,14 +371,23 @@ or awaiting confirmation within that request. The standard Matrix indicator
 covers an active task, including tool calls, preparation and final delivery.
 Ordinary messages start without a separate text acknowledgement. Local
 commands such as `!status` do not start it. The connector renews the indicator
-every 15 seconds with a 30-second server expiry. Before outgoing replies,
+every 10 seconds with a 30-second server expiry. Each update has an 8-second
+deadline covering the access check and the abortable HTTP request. A timed-out
+update releases the renewal queue; the next scheduled renewal can retry. Before
+outgoing replies,
 confirmations and task attachments, it clears typing and pauses renewal; 250 ms
 after delivery, it restores typing if the task is still active. This separates
 the new typing event from the message that can hide the indicator in clients.
 Completion, cancellation or failure clears the indicator and cancels a pending
 restore. After a crash it expires without a cleanup request. Access is checked
-before each update; indicator errors do not fail the task. A brief visual flicker
-can still depend on the client.
+before each update; indicator errors do not fail the task. Structured
+`typing-update` host logs record the bot, room, requested state,
+access-check or send phase, outcome, duration and time since the previous
+successful update. They never contain message text, tokens or response bodies.
+These logs show connector requests, not whether a client displayed the indicator.
+A brief visual flicker can still depend on the client. An aborted request may
+already have reached the server; cleanup is best-effort and the server expiry
+still bounds stale typing if cleanup fails.
 
 The indicator belongs to the room, not an individual thread. Element controls
 how it is displayed, and clients may hide it. It indicates an active run, not
