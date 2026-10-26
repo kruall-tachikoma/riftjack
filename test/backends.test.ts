@@ -506,10 +506,11 @@ test('cancellation during server startup does not start a model turn', async t =
   assert.ok(!f.calls().some(c => c.method === 'turn/start'));
 });
 
-test('unsolicited approval requests are declined without changing permissions', async t => {
+test('unsolicited approval requests fail without inventing a user decline', async t => {
   const f = setup(t);
-  assert.equal(await f.backend('codex', '[approval]', 'key', signal(), '@owner:test'), 'denied');
-  assert.deepEqual(f.calls().find(c => c.id === 999).result, { decision: 'decline' });
+  await assert.rejects(f.backend('codex', '[approval]', 'key', signal(), '@owner:test'), /No user decline was received/);
+  assert.equal(f.calls().find(c => c.id === 999).result, undefined);
+  assert.equal(f.calls().find(c => c.id === 999).error.code, -32603);
 });
 
 test('Matrix bridge and App Server deliver steering end to end without a second model turn', async t => {
@@ -543,7 +544,7 @@ async function until(predicate: () => boolean): Promise<void> {
   }
 }
 
-function confirming(t: { after(fn: () => void): void }) {
+function confirming(t: { after(fn: () => void): void }, afterDelivery?: () => Promise<void>) {
   const f = setup(t);
   const replies: string[] = [], errors: unknown[] = [];
   let allowed = true, privateRoom = true, eventId = 0;
@@ -554,6 +555,7 @@ function confirming(t: { after(fn: () => void): void }) {
     confirmation: async (_room, _event, text, controls, markdown) => {
       assert.match(markdown, /^### Confirmation /);
       replies.push(text); controls.bind('$request-' + replies.length);
+      await afterDelivery?.();
     },
     reply: async (_room, _event, text) => { replies.push(text); }, report: error => errors.push(error),
     receive: async () => ({ path: '/file', name: 'caption', size: 1, image: false, mimetype: 'text/plain' }),
@@ -566,6 +568,41 @@ function confirming(t: { after(fn: () => void): void }) {
     reactionTarget: () => '$request-' + (replies.findIndex(text => text.startsWith('Confirmation ')) + 1),
     revoke: () => { allowed = false; bridge.revoke('@owner:test'); }, publicRoom: () => { privateRoom = false; } };
 }
+
+test('confirmation delivery failure reports a safe technical cause, never a user decline', async t => {
+  const f = confirming(t, async () => {
+    throw Object.assign(new Error('Bearer secret-token private request body'), { statusCode: 503, code: 'ECONNRESET' });
+  });
+  await f.bridge.handle('!dm:test', f.event('[confirm]'));
+  const response = f.calls().find(c => c.id === 'approval-A');
+  assert.equal(response.result, undefined);
+  assert.equal(response.error.code, -32603);
+  assert.match(response.error.message, /No user decline was received/);
+  assert.match(response.error.message, /HTTP 503/);
+  assert.match(response.error.message, /ECONNRESET/);
+  assert.doesNotMatch(response.error.message, /Bearer|secret-token|private request body/);
+  assert.ok(f.replies.some(text => text.includes('No user decline was received') && text.includes('HTTP 503')));
+  assert.equal(f.bridge.busy, false);
+  assert.equal(f.calls().filter(c => c.method === 'turn/start').length, 1);
+});
+
+test('a checkmark accepted during delivery stays accepted if later delivery work fails', async t => {
+  let release!: () => void;
+  const delivered = new Promise<void>(resolve => { release = resolve; });
+  const f = confirming(t, async () => { await delivered; throw new Error('late delivery failure'); });
+  const task = f.bridge.handle('!dm:test', f.event('[confirm]'));
+  await until(() => f.confirmations().length === 1);
+  await f.bridge.handle('!dm:test', { ...f.event(''), type: 'm.reaction', content: {
+    'm.relates_to': { rel_type: 'm.annotation', event_id: f.reactionTarget(), key: '✅\uFE0F' },
+  } });
+  release();
+  await task;
+  const responses = f.calls().filter(c => c.id === 'approval-A');
+  assert.equal(responses.length, 1);
+  assert.deepEqual(responses[0].result, { decision: 'accept' });
+  assert.equal(responses[0].error, undefined);
+  assert.deepEqual(f.errors, []);
+});
 
 test('ordinary messages in any language steer the task without answering a pending confirmation', async t => {
   const f = confirming(t);
@@ -753,13 +790,16 @@ test('changed room membership prevents an answer reaching the server', async t =
   assert.equal(f.calls().some(c => c.id === 'approval-A'), false);
 });
 
-test('wrong-thread requests and never policy are declined without an interactive prompt', async t => {
+test('wrong-thread requests and never policy fail without an interactive prompt or a user decline', async t => {
   const f = confirming(t);
   await f.bridge.handle('!dm:test', f.event('[confirm] [wrong-thread]'));
   f.config.codexApprovalPolicy = 'never';
   await f.bridge.handle('!dm:test', f.event('[confirm]'));
   assert.equal(f.confirmations().length, 0);
-  assert.ok(f.calls().filter(c => c.id === 'approval-A').every(c => c.result.decision === 'decline'));
+  const answers = f.calls().filter(c => c.id === 'approval-A');
+  assert.equal(answers.length, 2);
+  assert.ok(answers.every(c => c.result === undefined && c.error.code === -32603));
+  assert.ok(f.replies.some(text => text.includes('No user decline was received')));
 });
 
 for (const verb of ['approve', 'deny']) test(`plugin installation ${verb} uses local RPCs and never starts a model turn`, async t => {

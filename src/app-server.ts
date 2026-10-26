@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { Config } from './config.js';
 import { deniedRequest } from './codex-interactions.js';
-import { PublicError, OwnerDiagnosticError } from './errors.js';
+import { PublicError, OwnerDiagnosticError, errorMessage } from './errors.js';
 import { codexAccountFailure } from './auth-diagnostics.js';
 import { codexNetworkArgs, verifyCodexNetwork } from './codex-network.js';
 
@@ -78,11 +78,27 @@ export class AppServer {
           // Do not block the JSONL reader: answers, cancellation and other requests keep flowing.
           void (async () => {
             let result: object | undefined;
-            try { result = this.incoming.size <= 10 ? await onRequest?.(entry.request, entry.controller.signal) : undefined; }
-            catch { /* Fail closed, without logging user answers or server diagnostics. */ }
+            let failure: PublicError | undefined;
+            try {
+              if (this.incoming.size > 10) throw new PublicError('Too many pending confirmation requests.');
+              result = await onRequest?.(entry.request, entry.controller.signal);
+              if (result === undefined && deniedRequest(message.method) !== undefined) {
+                throw new PublicError('The confirmation request could not be handled in the active conversation or approval policy.');
+              }
+            } catch (error) {
+              failure = new PublicError('Codex confirmation failed before a decision could be delivered. '
+                + 'No user decline was received. ' + errorMessage(error, 'Confirmation handling failed'));
+            }
             if (entry.controller.signal.aborted || this.closing || this.failure) return;
             this.incoming.delete(message.id);
-            result ??= deniedRequest(message.method);
+            if (failure) {
+              // A transport/handler failure is not a human decision. Report it
+              // over RPC and end the turn with the sanitized diagnostic, rather
+              // than letting the model infer a human decision from a failed RPC.
+              this.write({ id: message.id, error: { code: -32603, message: failure.message } });
+              fail(failure);
+              return;
+            }
             this.write(result !== undefined ? { id: message.id, result } : { id: message.id, error: { code: -32601, message: 'This interactive request is not supported by this connector.' } });
           })().catch(() => fail(new PublicError('Could not answer Codex App Server request.')));
         } else if (message.method) {
