@@ -11,6 +11,7 @@ export async function sendConfirmation(text: string, controls: ReactionControls,
   // The request size is checked before formatting. Escaping may expand the
   // source beyond the normal reply limit; confirmations must never truncate.
   for (const part of replyContent(markdown ?? text, markdown !== undefined, false, 'm.text')) {
+    if (!controls.isPending()) return;
     await transport.authorize();
     if (!controls.isPending()) return;
     lastId = await transport.sendMessage(part);
@@ -19,6 +20,9 @@ export async function sendConfirmation(text: string, controls: ReactionControls,
   if (!lastId || !controls.isPending()) return;
   controls.bind(lastId);
   for (const key of controls.keys) {
+    // A manual answer may arrive while the previous seed waits out a 429.
+    // Do not start another authorization request after the decision is final.
+    if (!controls.isPending()) return;
     await transport.authorize();
     if (!controls.isPending()) return;
     try { await transport.sendReaction(lastId, key); }

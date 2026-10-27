@@ -20,6 +20,7 @@ import { TurnReaction } from './turn-reaction.js';
 import { WorkerBridge } from './worker-bridge.js';
 import { WorkerMatrixClient } from './worker-matrix-client.js';
 import { MessageMatrixClient } from './message-matrix-client.js';
+import { RateLimitedMatrixClient } from './rate-limited-matrix-client.js';
 import { WorkerQueue } from './worker-queue.js';
 import { WorkerService } from './worker-service.js';
 import { WorkerServer } from './worker-server.js';
@@ -209,7 +210,7 @@ async function main() {
     const recoverMessages = account.kind === 'codex' || account.kind === 'claude';
     const client = account.kind === 'grok' ? new WorkerMatrixClient(config.homeserver, account.accessToken, storage, crypto)
       : recoverMessages ? new MessageMatrixClient(config.homeserver, account.accessToken, storage, crypto)
-      : new MatrixClient(config.homeserver, account.accessToken, storage, crypto);
+      : new RateLimitedMatrixClient(config.homeserver, account.accessToken, storage, crypto);
     const media = new MatrixMedia(client, { workspace: botConfig.workspace, homeserver: config.homeserver,
       accessToken: account.accessToken, maxBytes: config.maxMediaBytes, scope: account.userId,
       uploadTimeoutMs: config.mediaUploadTimeoutMs,

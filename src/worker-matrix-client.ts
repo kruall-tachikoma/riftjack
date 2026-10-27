@@ -1,8 +1,8 @@
-import { MatrixClient } from '@vector-im/matrix-bot-sdk';
+import { RateLimitedMatrixClient } from './rate-limited-matrix-client.js';
 
 // Unlike model tasks, durable inbox writes must finish before saving /sync's
 // next_batch. Failures keep the previous checkpoint on disk for restart replay.
-export class WorkerMatrixClient extends MatrixClient {
+export class WorkerMatrixClient extends RateLimitedMatrixClient {
   inbox?: (room: string, event: any) => Promise<void>;
   protected override async startSyncInternal() {
     this.persistTokenAfterSync = true;
